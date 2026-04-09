@@ -1,6 +1,8 @@
-# 無人機地面控制系統 操作手冊
+# 無人機地面控制系統
 
 本系統以 PlayStation 手把透過藍牙控制無人機飛行，並搭載夾爪機構進行空中作業。
+
+> 📖 **第一次組裝？** 請先閱讀 [SETUP_GUIDE.md](SETUP_GUIDE.md)，從 Arduino Nano 開箱到整機整合測試均有詳細說明。
 
 ---
 
@@ -194,3 +196,17 @@ STEP_SPEED = 5              # 夾爪開合速度
 | CH4 | 偏航 Yaw | 1000 ~ 2000 |
 | CH5 | 解鎖 Arm | 1000 / 2000 |
 | CH6 | 飛行模式（固定自穩）| 2000 |
+
+---
+
+## 檔案說明
+
+| 檔案 | 說明 |
+|------|------|
+| `controller.py` | 主控制程式（需手把）|
+| `keyboard_controller.py` | 鍵盤備用控制程式（無手把時使用）|
+| `sketch_mar26a/sketch_mar26a.ino` | Arduino 韌體，負責藍牙接收與 IBUS 轉換 |
+| `test_bt.py` | 藍牙通訊測試工具 |
+| `test_joy.py` | 手把按鍵編號測試工具 |
+| `test_ibus.py` | IBUS 封包監看工具（debug 用）|
+| `SETUP_GUIDE.md` | 從零開始的完整組裝與設定指南 |
