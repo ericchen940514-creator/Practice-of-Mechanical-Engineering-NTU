@@ -21,6 +21,8 @@ BTN_L1     = 9
 BTN_R1     = 10
 BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT = 11, 12, 13, 14
 BTN_OPTIONS = 6  # 🛑 Options 鍵 (用來長按關機)
+BTN_ESTOP_A = 4  # 🚨 緊急停機組合鍵（4 + 6 同時按）
+BTN_ESTOP_B = 6
 
 def connect_serial():
     """嘗試連線，失敗回傳 None"""
@@ -139,6 +141,16 @@ try:
 
     while True:
         pygame.event.pump()
+
+        # 🚨 緊急停機（按鈕 4 + 6 同時按，立即斷電）
+        if joystick.get_button(BTN_ESTOP_A) and joystick.get_button(BTN_ESTOP_B):
+            print("\n🚨 [緊急停機] 觸發！立即送出停機指令...")
+            estop_packet = b'S' + bytes([0, 127, 127, 127, gripper_val, 0])
+            if bt_serial is not None and bt_serial.is_open:
+                for _ in range(5):  # 連送 5 次確保收到
+                    send_packet(bt_serial, estop_packet)
+            print("💀 已送出停機指令，強制結束程式。")
+            raise KeyboardInterrupt
 
         # 💀 [Options 鍵] 長按 3 秒安全下線
         if joystick.get_button(BTN_OPTIONS) == 1:
