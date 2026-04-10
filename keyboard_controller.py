@@ -25,16 +25,36 @@ STEP_SPEED = 5              # 夾爪開合速度
 # X 長按 3 秒    → 安全退出
 # ==========================================
 
+def connect_serial():
+    """嘗試連線，失敗回傳 None"""
+    try:
+        s = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+        print(f"✅ 成功連線到 {COM_PORT}")
+        return s
+    except Exception as e:
+        print(f"❌ 連線失敗: {e}")
+        return None
+
+def send_packet(ser, packet):
+    """送封包，清 TX/RX buffer，失敗回傳 False"""
+    try:
+        ser.reset_input_buffer()   # 清掉無人機回傳的堆積資料
+        ser.reset_output_buffer()  # 清掉積壓的發送封包
+        ser.write(packet)
+        return True
+    except Exception:
+        return False
+
+# --- 初始連線 ---
 print(f"嘗試連線到 {COM_PORT}...")
-try:
-    bt_serial = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
-    print("✅ 成功連線到無人機藍牙！")
-except Exception as e:
-    print(f"❌ 連線失敗: {e}"); exit()
+bt_serial = connect_serial()
+if bt_serial is None:
+    exit()
 
 pygame.init()
 screen = pygame.display.set_mode((360, 80))
 pygame.display.set_caption("鍵盤控制模式 ← 請點選此視窗再操作")
+clock = pygame.time.Clock()  # 用於精確控制迴圈頻率
 
 # --- 系統變數初始化 ---
 base_throttle = 0
@@ -46,6 +66,7 @@ prev_tab = prev_shift = prev_z = prev_c = prev_r = False
 exit_press_time = 0
 is_exiting = False
 last_print_time = 0
+reconnect_cooldown = 0
 
 print("\n⌨️  [鍵盤控制模式] 已上線！請點選彈出的小視窗後再操作。")
 print("W/S=油門  A/D=偏航  ↑↓=俯仰  ←→=翻滾")
@@ -118,24 +139,45 @@ try:
         if keys[pygame.K_q]: gripper_val = max(0,   gripper_val - STEP_SPEED)
         if keys[pygame.K_e]: gripper_val = min(255, gripper_val + STEP_SPEED)
 
-        # 📦 打包發送
+        # 📦 打包發送（清空積壓封包，避免延遲堆疊）
         data_packet = b'S' + bytes([final_throttle, yaw_val, pitch_val, roll_val, gripper_val, arm_state])
-        bt_serial.write(data_packet)
+
+        if bt_serial is None or not bt_serial.is_open:
+            # 藍牙斷線，等待重連（每 3 秒嘗試一次）
+            now = time.time()
+            if now >= reconnect_cooldown:
+                print("\n🔄 藍牙斷線，嘗試重連...", end="\r")
+                bt_serial = connect_serial()
+                reconnect_cooldown = now + 3.0
+        else:
+            ok = send_packet(bt_serial, data_packet)
+            if not ok:
+                print("\n⚠️  串口寫入失敗，藍牙可能已斷線")
+                try:
+                    bt_serial.close()
+                except Exception:
+                    pass
+                bt_serial = None
+                arm_state = 0  # 斷線時強制上鎖
 
         # 🖥️ 即時狀態顯示
         now = time.time()
         if not is_exiting and now - last_print_time >= 0.2:
-            arm_str = "解鎖" if arm_state == 255 else "上鎖"
-            print(f"狀態:{arm_str} | 基準:{base_throttle:3d}(步進:{throttle_step:2d}) | 總油門:{final_throttle:3d} | 夾爪:{gripper_val:3d} | Y:{yaw_val:3d} P:{pitch_val:3d} R:{roll_val:3d}", end="\r")
+            conn_str = "連線中" if (bt_serial and bt_serial.is_open) else "斷線中"
+            arm_str  = "解鎖" if arm_state == 255 else "上鎖"
+            print(f"[{conn_str}] 狀態:{arm_str} | 基準:{base_throttle:3d}(步進:{throttle_step:2d}) | 總油門:{final_throttle:3d} | 夾爪:{gripper_val:3d} | Y:{yaw_val:3d} P:{pitch_val:3d} R:{roll_val:3d}", end="\r")
             last_print_time = now
 
-        time.sleep(0.04)
+        # 保持 pygame 視窗正常回應（不呼叫這個 Windows 會顯示「沒有回應」）
+        screen.fill((30, 30, 30))
+        pygame.display.update()
+        clock.tick(25)  # 精確鎖定 25 Hz，取代 time.sleep(0.04)
 
 except KeyboardInterrupt:
     print("\n🛑 任務中止（Ctrl+C）。")
 finally:
     print("\n🔌 正在關閉連線...")
-    if 'bt_serial' in locals() and bt_serial.is_open:
+    if bt_serial is not None and bt_serial.is_open:
         bt_serial.close()
     pygame.quit()
     print("✅ 已安全關閉。")
