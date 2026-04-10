@@ -45,16 +45,70 @@ def send_packet(ser, packet):
     except Exception:
         return False
 
-# --- 初始連線 ---
-print(f"嘗試連線到 {COM_PORT}...")
-bt_serial = connect_serial()
-if bt_serial is None:
-    exit()
+# --- 初始連線（最多等待 60 秒，X 長按 3 秒可中止）---
+def wait_for_connection(timeout=60):
+    """嘗試連線，最多等 timeout 秒，期間可用 X 長按 3 秒中止。回傳 serial 或 None"""
+    deadline = time.time() + timeout
+    x_press_time = None
+
+    print(f"\n🔄 等待藍牙連線（最多 {timeout} 秒）...")
+    print("   X 長按 3 秒可中止等待\n")
+
+    while time.time() < deadline:
+        remaining = int(deadline - time.time())
+
+        # 處理 pygame 事件（偵測 X 鍵）
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_x]:
+            if x_press_time is None:
+                x_press_time = time.time()
+                print("\n⚠️  偵測到中止指令，繼續按住 X 鍵 3 秒...")
+            elif time.time() - x_press_time >= 3.0:
+                print("\n🛑 已中止等待。")
+                return None
+        else:
+            x_press_time = None
+
+        ser = connect_serial()
+        if ser is not None:
+            return ser
+
+        print(f"   ⏳ 剩餘 {remaining} 秒，3 秒後重試...", end="\r")
+        # 等待 3 秒，但每 0.1 秒檢查一次 X 鍵
+        wait_end = time.time() + 3.0
+        while time.time() < wait_end:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_x]:
+                if x_press_time is None:
+                    x_press_time = time.time()
+                    print("\n⚠️  偵測到中止指令，繼續按住 X 鍵 3 秒...")
+                elif time.time() - x_press_time >= 3.0:
+                    print("\n🛑 已中止等待。")
+                    return None
+            else:
+                x_press_time = None
+            time.sleep(0.1)
+
+    print(f"\n❌ 超過 {timeout} 秒仍無法連線，結束程式。")
+    return None
 
 pygame.init()
 screen = pygame.display.set_mode((360, 80))
 pygame.display.set_caption("鍵盤控制模式 ← 請點選此視窗再操作")
-clock = pygame.time.Clock()  # 用於精確控制迴圈頻率
+clock = pygame.time.Clock()
+
+print(f"嘗試連線到 {COM_PORT}...")
+bt_serial = wait_for_connection(timeout=60)
+if bt_serial is None:
+    pygame.quit()
+    exit()
 
 # --- 系統變數初始化 ---
 base_throttle = 0
