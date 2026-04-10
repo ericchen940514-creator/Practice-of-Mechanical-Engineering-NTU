@@ -5,58 +5,142 @@ import time
 # ==========================================
 # 🎛️ 試飛調音台 (專屬手感參數設定區)
 # ==========================================
-COM_PORT = 'COM4'      
+COM_PORT = 'COM4'
 BAUD_RATE = 9600
 
-JOYSTICK_SENSITIVITY = 60   
-TILT_SENS = 0.6  
-YAW_SENS  = 0.5  
+JOYSTICK_SENSITIVITY = 60
+TILT_SENS = 0.6
+YAW_SENS  = 0.5
 STEP_SPEED = 5
 # ==========================================
 
 # --- 按鍵編號定義 ---
-BTN_SQUARE = 2   
-BTN_TRI    = 3   
-BTN_L1     = 9   
-BTN_R1     = 10   
+BTN_SQUARE = 2
+BTN_TRI    = 3
+BTN_L1     = 9
+BTN_R1     = 10
 BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT = 11, 12, 13, 14
 BTN_OPTIONS = 6  # 🛑 Options 鍵 (用來長按關機)
 
-print(f"嘗試連線到 {COM_PORT}...")
-try:
-    bt_serial = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
-    print("✅ 成功連線到無人機藍牙！")
-except Exception as e:
-    print(f"❌ 連線失敗: {e}"); exit()
+def connect_serial():
+    """嘗試連線，失敗回傳 None"""
+    try:
+        s = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+        print(f"✅ 成功連線到 {COM_PORT}")
+        return s
+    except Exception as e:
+        print(f"❌ 連線失敗: {e}")
+        return None
 
-pygame.init(); pygame.joystick.init()
-joystick = pygame.joystick.Joystick(0)
-joystick.init()
+def send_packet(ser, packet):
+    """送封包，清 TX/RX buffer，失敗回傳 False"""
+    try:
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        ser.write(packet)
+        return True
+    except Exception:
+        return False
+
+def wait_for_connection(joystick, timeout=60):
+    """嘗試連線，最多等 timeout 秒。Options 長按 3 秒可中止。回傳 serial 或 None"""
+    deadline = time.time() + timeout
+    options_press_time = None
+
+    print(f"\n🔄 等待藍牙連線（最多 {timeout} 秒）...")
+    print("   Options 長按 3 秒可中止等待\n")
+
+    while time.time() < deadline:
+        remaining = int(deadline - time.time())
+
+        pygame.event.pump()
+
+        # Options 鍵長按 3 秒中止
+        if joystick is not None:
+            if joystick.get_button(BTN_OPTIONS):
+                if options_press_time is None:
+                    options_press_time = time.time()
+                    print("\n⚠️  偵測到中止指令，繼續按住 Options 3 秒...")
+                elif time.time() - options_press_time >= 3.0:
+                    print("\n🛑 已中止等待。")
+                    return None
+            else:
+                options_press_time = None
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+
+        ser = connect_serial()
+        if ser is not None:
+            return ser
+
+        print(f"   ⏳ 剩餘 {remaining} 秒，3 秒後重試...", end="\r")
+        wait_end = time.time() + 3.0
+        while time.time() < wait_end:
+            pygame.event.pump()
+            if joystick is not None:
+                if joystick.get_button(BTN_OPTIONS):
+                    if options_press_time is None:
+                        options_press_time = time.time()
+                        print("\n⚠️  偵測到中止指令，繼續按住 Options 3 秒...")
+                    elif time.time() - options_press_time >= 3.0:
+                        print("\n🛑 已中止等待。")
+                        return None
+                else:
+                    options_press_time = None
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+            time.sleep(0.1)
+
+    print(f"\n❌ 超過 {timeout} 秒仍無法連線，結束程式。")
+    return None
+
+# --- 初始化 pygame + 手把 ---
+pygame.init()
+pygame.joystick.init()
+
+try:
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+    print(f"✅ 手把已連線：{joystick.get_name()}")
+except Exception as e:
+    print(f"❌ 找不到手把: {e}")
+    pygame.quit()
+    exit()
+
+# --- 初始連線（最多等待 60 秒）---
+print(f"嘗試連線到 {COM_PORT}...")
+bt_serial = wait_for_connection(joystick, timeout=60)
+if bt_serial is None:
+    pygame.quit()
+    exit()
 
 # --- 系統變數初始化 ---
-base_throttle = 0           
-throttle_step = 5           
-gripper_val = 127           
-arm_state = 0               
+base_throttle = 0
+throttle_step = 5
+gripper_val = 127
+arm_state = 0
 offset_throttle, offset_yaw, offset_pitch, offset_roll = 0.0, 0.0, 0.0, 0.0
 prev_up, prev_down, prev_left, prev_right = 0, 0, 0, 0
 prev_btn_tri, prev_btn_sq = 0, 0
 
-# ⏱️ 長按關機計時變數
 exit_press_time = 0
 is_exiting = False
-
-# 🖥️ 顯示節流 (每 200ms 刷新一次，不卡 VSCode)
 last_print_time = 0
+reconnect_cooldown = 0
 PRINT_INTERVAL = 0.2
+
+clock = pygame.time.Clock()
 
 try:
     print("\n🚀 [單人任務模式] 終端機控制系統已上線！")
-    
-    while True:
-        pygame.event.pump() 
 
-        # 💀 [Options 鍵] 長按 3 秒安全下線邏輯
+    while True:
+        pygame.event.pump()
+
+        # 💀 [Options 鍵] 長按 3 秒安全下線
         if joystick.get_button(BTN_OPTIONS) == 1:
             if not is_exiting:
                 is_exiting = True
@@ -112,24 +196,41 @@ try:
                 arm_state = 0
         prev_btn_tri = curr_tri
 
-        # 📦 打包發送
+        # 📦 打包發送（清空積壓封包，避免延遲堆疊）
         data_packet = b'S' + bytes([final_throttle, yaw_val, pitch_val, roll_val, gripper_val, arm_state])
-        bt_serial.write(data_packet)
 
-        # 🖥️ 介面即時顯示 (節流版，不炸 VSCode)
+        if bt_serial is None or not bt_serial.is_open:
+            now = time.time()
+            if now >= reconnect_cooldown:
+                print("\n🔄 藍牙斷線，嘗試重連...", end="\r")
+                bt_serial = connect_serial()
+                reconnect_cooldown = now + 3.0
+        else:
+            ok = send_packet(bt_serial, data_packet)
+            if not ok:
+                print("\n⚠️  串口寫入失敗，藍牙可能已斷線")
+                try:
+                    bt_serial.close()
+                except Exception:
+                    pass
+                bt_serial = None
+                arm_state = 0  # 斷線時強制上鎖
+
+        # 🖥️ 介面即時顯示
         now = time.time()
         if not is_exiting and now - last_print_time >= PRINT_INTERVAL:
-            arm_str = "解鎖" if arm_state == 255 else "上鎖"
-            print(f"狀態:{arm_str} | 總油門:{final_throttle:3d} | 夾爪:{gripper_val:3d} | Y:{yaw_val:3d} P:{pitch_val:3d} R:{roll_val:3d}", end="\r")
+            conn_str = "連線中" if (bt_serial and bt_serial.is_open) else "斷線中"
+            arm_str  = "解鎖" if arm_state == 255 else "上鎖"
+            print(f"[{conn_str}] 狀態:{arm_str} | 基準:{base_throttle:3d}(步進:{throttle_step:2d}) | 總油門:{final_throttle:3d} | 夾爪:{gripper_val:3d} | Y:{yaw_val:3d} P:{pitch_val:3d} R:{roll_val:3d}", end="\r")
             last_print_time = now
 
-        time.sleep(0.04)
+        clock.tick(25)  # 精確鎖定 25 Hz
 
 except KeyboardInterrupt:
     print("\n🛑 任務中止 (接收到鍵盤強制中斷)。")
 finally:
     print("\n🔌 正在關閉藍牙通訊與手把硬體資源...")
-    if 'bt_serial' in locals() and bt_serial.is_open:
+    if bt_serial is not None and bt_serial.is_open:
         bt_serial.close()
     pygame.quit()
     print("✅ 地面控制系統已完全安全關閉。")
