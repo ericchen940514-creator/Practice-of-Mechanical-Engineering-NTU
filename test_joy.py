@@ -11,7 +11,7 @@ if pygame.joystick.get_count() == 0:
 joystick = pygame.joystick.Joystick(0)
 joystick.init()
 print(f"🎮 偵測到手把: {joystick.get_name()}")
-print("👉 現在請按下 L1 和 R1，看看畫面上顯示 Button 幾號...")
+print("👉 現在請按下手把，看看畫面上顯示 Button 幾號...")
 
 try:
     while True:
