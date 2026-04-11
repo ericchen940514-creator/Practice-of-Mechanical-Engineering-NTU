@@ -79,13 +79,18 @@ S | Throttle | Yaw | Pitch | Roll | Gripper | Arm
 定高版協議（8 bytes）：
 
 ```
-S | t_val | Yaw | Pitch | Roll | Gripper | Arm | ah_val
+S | Throttle | Yaw | Pitch | Roll | TargetAlt | Arm | ah_val
 ```
 
-| 欄位 | 手動模式（ah_val=0） | 定高模式（ah_val=1） |
-|------|---------------------|---------------------|
-| `t_val` | 油門（0～255） | 目標高度（0～120 cm） |
-| `ah_val` | 0 | 1 |
+| 欄位 | 說明 |
+|------|------|
+| `Throttle` | 當前真實油門（0～255），**每包都送**，Arduino 以此為 PID 懸停基準 |
+| `TargetAlt` | 目標高度 cm（0～120）；手動模式時送 0 |
+| `ah_val` | 定高開關：0 = 手動，1 = 定高 |
+
+> **Gripper 已從封包移除**：伺服馬達直接由 Arduino 本地控制，不需要透過此封包傳遞。
+>
+> **與舊版的關鍵差異**：`Throttle` 在每一包都送出真實值。切入定高時 Arduino 直接以當前油門為懸停基準，不會有瞬間掉高度的問題。
 
 ---
 
@@ -106,7 +111,6 @@ python main_althold.py --port COM4
 | **△（Triangle）** | 解鎖 / 上鎖 |
 | **○（Circle）** | 切換定高開 / 關 |
 | **□（Square）** | 搖桿校準（手動模式下） |
-| **L1 / R1** | 夾爪閉合 / 張開 |
 | **Options 長按 3 秒** | 安全退出 |
 | **按鍵 4 + 6 同時** | 🚨 緊急停機 |
 
