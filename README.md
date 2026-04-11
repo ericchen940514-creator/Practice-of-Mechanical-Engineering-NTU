@@ -4,6 +4,8 @@
 
 > 📖 **第一次組裝？** 請先閱讀 [SETUP_GUIDE.md](SETUP_GUIDE.md)，從 Arduino Nano 開箱到整機整合測試均有詳細說明。
 
+> 📊 **零件規格試算表**：[drone parts data](https://docs.google.com/spreadsheets/d/1BVyKEbavxxj2lV3zZNN0sOg7pvSjEQ_-sjfodHf1z0o/)
+
 ---
 
 ## 系統架構
