@@ -91,8 +91,6 @@ void setup() {
   BTSerial.begin(9600);
   Wire.begin();
 
-  gripper_servo.attach(6);
-
   altSensor.init();
   altSensor.setTimeout(300);
   altSensor.setMeasurementTimingBudget(20000);
@@ -100,27 +98,26 @@ void setup() {
 }
 
 // ─────────────────────────────────────────
-// 藍牙協議：S + 8 bytes（與 sketch_althold.ino 相同）
-//   [0] t_val   油門 (0~255)  ／定高時為目標高度 (0~130 cm)
-//   [1] y_val   偏航
-//   [2] p_val   俯仰
-//   [3] r_val   翻滾
-//   [4] g_val   夾爪
-//   [5] arm_val 解鎖狀態
-//   [6] ah_val  定高開關 (0=手動, 1=定高)
+// 藍牙協議：S + 7 bytes
+//   [0] thr_val    當前真實油門 (0~255)，Arduino 以此為 PID base_throttle
+//   [1] y_val      偏航
+//   [2] p_val      俯仰
+//   [3] r_val      翻滾
+//   [4] alt_val    目標高度 cm (0~120)；手動模式時送 0
+//   [5] arm_val    解鎖狀態
+//   [6] ah_val     定高開關 (0=手動, 1=定高)
 //
-// 【新行為】
-//   ah_val=1 且定高已啟動時：t_val 視為目標高度（cm），
-//   Arduino 直接更新 target_alt_cm，PID 會自動爬升/下降到新目標。
+// 每包都送當前油門，切入定高時 Arduino 直接以此為懸停基準。
+// gripper 伺服馬達由 Arduino 本地邏輯驅動，不走此封包。
 // ─────────────────────────────────────────
 void loop() {
   while (BTSerial.available() >= 8) {
     if (BTSerial.read() == 'S') {
-      int t_val   = BTSerial.read();
+      int thr_val = BTSerial.read();   // 當前油門 0~255
       int y_val   = BTSerial.read();
       int p_val   = BTSerial.read();
       int r_val   = BTSerial.read();
-      int g_val   = BTSerial.read();
+      int alt_val = BTSerial.read();   // 目標高度 cm（定高時有效）
       int arm_val = BTSerial.read();
       int ah_val  = BTSerial.read();
 
@@ -131,16 +128,13 @@ void loop() {
       ibus_channels[4] = map(arm_val, 0, 255, 1000, 2000);
       ibus_channels[5] = 2000;
 
-      // 夾爪
-      gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
-
       // ── 定高狀態機 ──
       if (ah_val == 1 && !alt_hold_active) {
-        // 【剛切入定高】記錄當下高度與懸停油門
+        // 【剛切入定高】以當前油門為懸停基準，以當下感測高度為目標
         int raw_mm = altSensor.readRangeContinuousMillimeters();
         if (!altSensor.timeoutOccurred() && raw_mm > 30 && raw_mm < 1300) {
-          target_alt_cm   = raw_mm / 10.0f;
-          base_throttle   = map(t_val, 0, 255, 1000, 2000);
+          target_alt_cm   = raw_mm / 10.0f;         // 先用真實高度
+          base_throttle   = map(thr_val, 0, 255, 1000, 2000);  // 用真實油門
           integral        = 0;
           last_error      = 0;
           last_pid_time   = millis();
@@ -149,22 +143,21 @@ void loop() {
         // 感測器無效時不切入，保持手動（安全保護）
 
       } else if (ah_val == 1 && alt_hold_active) {
-        // 【定高中，更新目標高度】
-        // t_val 此時代表目標高度（cm），由 Python 端換算後傳入
-        float new_target = constrain((float)t_val, 3.0f, 130.0f);
+        // 【定高中】持續更新 base_throttle 與目標高度
+        base_throttle = map(thr_val, 0, 255, 1000, 2000);
+        float new_target = constrain((float)alt_val, 3.0f, 120.0f);
         if (new_target != target_alt_cm) {
-          target_alt_cm = new_target;
-          // 不重置積分，讓 PID 平滑過渡到新目標
+          target_alt_cm = new_target;   // PID 平滑過渡，不重置積分
         }
 
       } else if (ah_val == 0 && alt_hold_active) {
         // 【關閉定高】回到手動油門
-        alt_hold_active   = false;
-        ibus_channels[2]  = map(t_val, 0, 255, 1000, 2000);
+        alt_hold_active  = false;
+        ibus_channels[2] = map(thr_val, 0, 255, 1000, 2000);
 
       } else {
         // 【手動模式】正常更新油門
-        ibus_channels[2] = map(t_val, 0, 255, 1000, 2000);
+        ibus_channels[2] = map(thr_val, 0, 255, 1000, 2000);
       }
     }
   }

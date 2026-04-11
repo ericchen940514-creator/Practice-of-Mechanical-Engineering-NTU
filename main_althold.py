@@ -24,6 +24,12 @@ DEAD_ZONE  = 0.05
 ALT_STEP_DEFAULT = 10   # D-pad 每按一次調整幾 cm
 ALT_MAX_CM       = 120  # VL53L0X 有效上限
 
+# 封包格式（8 bytes）：
+#   [S] [throttle 0~255] [yaw] [pitch] [roll] [target_alt 0~120cm] [arm_val] [ah_val]
+# throttle 永遠送當前真實油門，Arduino 以此為 PID base_throttle
+# target_alt 取代原本 gripper 欄位，同時知道目標高度
+# gripper 伺服馬達由 Arduino 本地控制，不走此封包
+
 # --- 手把按鍵編號 ---
 BTN_CIRCLE  = 1   # ○：切換定高開/關
 BTN_SQUARE  = 2
@@ -58,9 +64,9 @@ def send_packet(ser, packet):
     except Exception:
         return False
 
-def safe_disconnect(ser, gripper_val):
+def safe_disconnect(ser):
     """送出停機封包後再關閉連線"""
-    shutdown = b'S' + bytes([0, 127, 127, 127, gripper_val, 0, 0])
+    shutdown = b'S' + bytes([0, 127, 127, 127, 0, 0, 0])
     for _ in range(3):
         try:
             ser.write(shutdown)
@@ -230,23 +236,15 @@ def read_gamepad(joystick, state):
             state['arm_state'] = 0
     state['prev_tri'] = curr_tri
 
-    # L1 / R1：夾爪
-    if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
-    if joystick.get_button(BTN_R1): state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
-
     # ── 封包內容決定 ──
-    # 定高模式：t_val = 目標高度（cm），讓 Arduino 更新 target_alt_cm
-    # 手動模式：t_val = 正常油門（0~255）
-    if state['alt_hold_active']:
-        t_val  = int(state['target_alt'])   # 0~130 cm
-        ah_val = 1
-    else:
-        t_val  = final_throttle             # 0~255
-        ah_val = 0
+    # throttle 永遠是當前真實油門（Arduino 以此為 PID base_throttle）
+    # target_alt：定高時送目標高度 cm，手動時送 0（Arduino 忽略）
+    target_alt_byte = int(state['target_alt']) if state['alt_hold_active'] else 0
+    ah_val          = 1 if state['alt_hold_active'] else 0
 
     channels = {
-        't_val':    t_val,
-        'throttle': final_throttle,         # 僅用於視窗顯示
+        'throttle':   final_throttle,
+        'target_alt': target_alt_byte,
         'yaw':   int((max(-1.0, min(1.0, raw_yaw   * YAW_SENS))  + 1.0) / 2.0 * 255),
         'pitch': int((max(-1.0, min(1.0, -raw_pitch * TILT_SENS)) + 1.0) / 2.0 * 255),
         'roll':  int((max(-1.0, min(1.0, raw_roll   * TILT_SENS)) + 1.0) / 2.0 * 255),
@@ -321,19 +319,12 @@ def read_keyboard(keys, state):
             state['arm_state'] = 0
     state['prev_r'] = curr_r
 
-    if keys[pygame.K_q]: state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
-    if keys[pygame.K_e]: state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
-
-    if state['alt_hold_active']:
-        t_val  = int(state['target_alt'])
-        ah_val = 1
-    else:
-        t_val  = final_throttle
-        ah_val = 0
+    target_alt_byte = int(state['target_alt']) if state['alt_hold_active'] else 0
+    ah_val          = 1 if state['alt_hold_active'] else 0
 
     channels = {
-        't_val':    t_val,
-        'throttle': final_throttle,
+        'throttle':   final_throttle,
+        'target_alt': target_alt_byte,
         'yaw':   int((max(-1.0, min(1.0, raw_yaw   * YAW_SENS))  + 1.0) / 2.0 * 255),
         'pitch': int((max(-1.0, min(1.0, -raw_pitch * TILT_SENS)) + 1.0) / 2.0 * 255),
         'roll':  int((max(-1.0, min(1.0, raw_roll   * TILT_SENS)) + 1.0) / 2.0 * 255),
@@ -408,7 +399,6 @@ if bt_serial is None:
 state = {
     'base_throttle': 0,
     'throttle_step': 5,
-    'gripper_val': 127,
     'arm_state': 0,
     'is_exiting': False,
     'exit_press_time': 0,
@@ -424,13 +414,13 @@ state = {
     'prev_tab': False, 'prev_shift': False,
     'prev_c': False, 'prev_z': False, 'prev_r': False, 'prev_h': False,
 }
-channels = {'t_val': 0, 'throttle': 0, 'yaw': 127, 'pitch': 127, 'roll': 127, 'ah_val': 0}
+channels = {'throttle': 0, 'target_alt': 0, 'yaw': 127, 'pitch': 127, 'roll': 127, 'ah_val': 0}
 reconnect_cooldown = 0
 last_print_time    = 0
 
 if mode == 'gamepad':
     print("\n🎮 手把模式已上線！（定高版）")
-    print("△=解鎖/上鎖  ○=定高切換  □=搖桿校準  L1/R1=夾爪")
+    print("△=解鎖/上鎖  ○=定高切換  □=搖桿校準")
     print("定高開啟時：D-pad上下=目標高度±  D-pad左右=步進量±")
     print("手動模式時：D-pad上下=基準油門±  Options長按3秒=退出  4+6=緊急停機\n")
 else:
@@ -451,7 +441,7 @@ try:
             if estop:
                 print("\n🚨 [緊急停機] 觸發！立即送出停機指令...")
                 if bt_serial and bt_serial.is_open:
-                    estop_pkt = b'S' + bytes([0, 127, 127, 127, state['gripper_val'], 0, 0])
+                    estop_pkt = b'S' + bytes([0, 127, 127, 127, 0, 0, 0])
                     for _ in range(5):
                         send_packet(bt_serial, estop_pkt)
                 raise KeyboardInterrupt
@@ -464,13 +454,13 @@ try:
 
         # 打包（8 bytes）
         data_packet = b'S' + bytes([
-            channels['t_val'],      # 定高時=目標高度cm / 手動時=油門
+            channels['throttle'],       # 當前真實油門（Arduino 以此為 PID base_throttle）
             channels['yaw'],
             channels['pitch'],
             channels['roll'],
-            state['gripper_val'],
+            channels['target_alt'],     # 定高時=目標高度cm；手動時=0
             state['arm_state'],
-            channels['ah_val'],     # 定高開關
+            channels['ah_val'],         # 定高開關
         ])
 
         connected = bt_serial is not None and bt_serial.is_open
@@ -484,7 +474,7 @@ try:
             ok = send_packet(bt_serial, data_packet)
             if not ok:
                 print("\n⚠️  串口寫入失敗，藍牙可能已斷線")
-                safe_disconnect(bt_serial, state['gripper_val'])
+                safe_disconnect(bt_serial)
                 bt_serial = None
                 state['arm_state'] = 0
                 state['alt_hold_active'] = False
@@ -506,6 +496,6 @@ except KeyboardInterrupt:
 finally:
     print("\n🔌 正在關閉連線...")
     if bt_serial is not None and bt_serial.is_open:
-        safe_disconnect(bt_serial, state['gripper_val'])
+        safe_disconnect(bt_serial)
     pygame.quit()
     print("✅ 已安全關閉。")
