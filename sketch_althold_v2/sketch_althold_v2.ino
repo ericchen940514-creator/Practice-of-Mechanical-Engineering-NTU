@@ -90,6 +90,7 @@ void setup() {
   Serial.begin(115200);
   BTSerial.begin(9600);
   Wire.begin();
+  gripper_servo.attach(6);
 
   altSensor.init();
   altSensor.setTimeout(300);
@@ -98,35 +99,37 @@ void setup() {
 }
 
 // ─────────────────────────────────────────
-// 藍牙協議：S + 7 bytes
+// 藍牙協議：S + 8 bytes（共 9 bytes）
 //   [0] thr_val    當前真實油門 (0~255)，Arduino 以此為 PID base_throttle
 //   [1] y_val      偏航
 //   [2] p_val      俯仰
 //   [3] r_val      翻滾
 //   [4] alt_val    目標高度 cm (0~120)；手動模式時送 0
-//   [5] arm_val    解鎖狀態
-//   [6] ah_val     定高開關 (0=手動, 1=定高)
-//
-// 每包都送當前油門，切入定高時 Arduino 直接以此為懸停基準。
-// gripper 伺服馬達由 Arduino 本地邏輯驅動，不走此封包。
+//   [5] g_val      夾爪 (0~255)，Arduino 直接驅動伺服馬達（D6），不送飛控
+//   [6] arm_val    解鎖狀態
+//   [7] ah_val     定高開關 (0=手動, 1=定高)
 // ─────────────────────────────────────────
 void loop() {
-  while (BTSerial.available() >= 8) {
+  while (BTSerial.available() >= 9) {
     if (BTSerial.read() == 'S') {
       int thr_val = BTSerial.read();   // 當前油門 0~255
       int y_val   = BTSerial.read();
       int p_val   = BTSerial.read();
       int r_val   = BTSerial.read();
       int alt_val = BTSerial.read();   // 目標高度 cm（定高時有效）
+      int g_val   = BTSerial.read();   // 夾爪
       int arm_val = BTSerial.read();
       int ah_val  = BTSerial.read();
 
-      // Roll / Pitch / Yaw / ARM 照常更新
+      // Roll / Pitch / Yaw / ARM 照常更新（送飛控）
       ibus_channels[0] = map(r_val, 0, 255, 1000, 2000);
       ibus_channels[1] = map(p_val, 0, 255, 1000, 2000);
       ibus_channels[3] = map(y_val, 0, 255, 1000, 2000);
       ibus_channels[4] = map(arm_val, 0, 255, 1000, 2000);
       ibus_channels[5] = 2000;
+
+      // 夾爪：Arduino 直接驅動伺服馬達，不經過飛控
+      gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
 
       // ── 定高狀態機 ──
       if (ah_val == 1 && !alt_hold_active) {

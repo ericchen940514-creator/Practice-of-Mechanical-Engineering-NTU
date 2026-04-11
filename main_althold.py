@@ -64,9 +64,9 @@ def send_packet(ser, packet):
     except Exception:
         return False
 
-def safe_disconnect(ser):
+def safe_disconnect(ser, gripper_val=127):
     """送出停機封包後再關閉連線"""
-    shutdown = b'S' + bytes([0, 127, 127, 127, 0, 0, 0])
+    shutdown = b'S' + bytes([0, 127, 127, 127, 0, gripper_val, 0, 0])
     for _ in range(3):
         try:
             ser.write(shutdown)
@@ -236,9 +236,11 @@ def read_gamepad(joystick, state):
             state['arm_state'] = 0
     state['prev_tri'] = curr_tri
 
+    # L1 / R1：夾爪（Arduino 直接驅動伺服馬達，不經過飛控）
+    if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
+    if joystick.get_button(BTN_R1): state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
+
     # ── 封包內容決定 ──
-    # throttle 永遠是當前真實油門（Arduino 以此為 PID base_throttle）
-    # target_alt：定高時送目標高度 cm，手動時送 0（Arduino 忽略）
     target_alt_byte = int(state['target_alt']) if state['alt_hold_active'] else 0
     ah_val          = 1 if state['alt_hold_active'] else 0
 
@@ -319,6 +321,10 @@ def read_keyboard(keys, state):
             state['arm_state'] = 0
     state['prev_r'] = curr_r
 
+    # Q / E：夾爪（Arduino 直接驅動伺服馬達，不經過飛控）
+    if keys[pygame.K_q]: state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
+    if keys[pygame.K_e]: state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
+
     target_alt_byte = int(state['target_alt']) if state['alt_hold_active'] else 0
     ah_val          = 1 if state['alt_hold_active'] else 0
 
@@ -355,7 +361,7 @@ def draw_status(screen, font, state, mode, channels, connected):
          conn_color),
         (f"定高: {'開啟 🔒' if state['alt_hold_active'] else '關閉'}   " + throttle_str,
          ah_color),
-        (f"夾爪: {state['gripper_val']:3d}   Y: {channels['yaw']:3d}  P: {channels['pitch']:3d}  R: {channels['roll']:3d}   COM: {COM_PORT}",
+        (f"夾爪: {state['gripper_val']:3d}  (L1/R1)   Y: {channels['yaw']:3d}  P: {channels['pitch']:3d}  R: {channels['roll']:3d}   COM: {COM_PORT}",
          (180, 180, 180)),
         ("○/H=定高切換  D-pad=高度/油門  Options/X長按3秒=退出  4+6=緊急停機",
          (110, 110, 110)),
@@ -399,6 +405,7 @@ if bt_serial is None:
 state = {
     'base_throttle': 0,
     'throttle_step': 5,
+    'gripper_val': 127,
     'arm_state': 0,
     'is_exiting': False,
     'exit_press_time': 0,
@@ -441,7 +448,7 @@ try:
             if estop:
                 print("\n🚨 [緊急停機] 觸發！立即送出停機指令...")
                 if bt_serial and bt_serial.is_open:
-                    estop_pkt = b'S' + bytes([0, 127, 127, 127, 0, 0, 0])
+                    estop_pkt = b'S' + bytes([0, 127, 127, 127, 0, state['gripper_val'], 0, 0])
                     for _ in range(5):
                         send_packet(bt_serial, estop_pkt)
                 raise KeyboardInterrupt
@@ -452,13 +459,15 @@ try:
         if should_exit:
             break
 
-        # 打包（8 bytes）
+        # 打包（9 bytes）
+        # Gripper 由 Arduino 直接驅動伺服馬達（D6），不經過 IBUS 飛控
         data_packet = b'S' + bytes([
             channels['throttle'],       # 當前真實油門（Arduino 以此為 PID base_throttle）
             channels['yaw'],
             channels['pitch'],
             channels['roll'],
             channels['target_alt'],     # 定高時=目標高度cm；手動時=0
+            state['gripper_val'],       # 夾爪（Arduino 本地驅動）
             state['arm_state'],
             channels['ah_val'],         # 定高開關
         ])
@@ -474,7 +483,7 @@ try:
             ok = send_packet(bt_serial, data_packet)
             if not ok:
                 print("\n⚠️  串口寫入失敗，藍牙可能已斷線")
-                safe_disconnect(bt_serial)
+                safe_disconnect(bt_serial, state['gripper_val'])
                 bt_serial = None
                 state['arm_state'] = 0
                 state['alt_hold_active'] = False
