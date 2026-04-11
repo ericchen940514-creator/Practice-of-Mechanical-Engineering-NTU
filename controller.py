@@ -45,20 +45,28 @@ def send_packet(ser, packet):
         return False
 
 def wait_for_connection(joystick, timeout=60):
-    """嘗試連線，最多等 timeout 秒。Options 長按 3 秒可中止。回傳 serial 或 None"""
+    """嘗試連線，最多等 timeout 秒。Options 長按 3 秒或緊急停機（4+6）可立即中止。"""
     deadline = time.time() + timeout
     options_press_time = None
+    next_retry = 0  # 立即嘗試第一次
 
     print(f"\n🔄 等待藍牙連線（最多 {timeout} 秒）...")
-    print("   Options 長按 3 秒可中止等待\n")
+    print("   Options 長按 3 秒 或 緊急停機（4+6）可中止\n")
 
     while time.time() < deadline:
-        remaining = int(deadline - time.time())
-
         pygame.event.pump()
 
-        # Options 鍵長按 3 秒中止
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+
         if joystick is not None:
+            # 緊急停機（4+6 同時）→ 立即中止
+            if joystick.get_button(BTN_ESTOP_A) and joystick.get_button(BTN_ESTOP_B):
+                print("\n🚨 緊急停機觸發，中止等待。")
+                return None
+
+            # Options 長按 3 秒中止
             if joystick.get_button(BTN_OPTIONS):
                 if options_press_time is None:
                     options_press_time = time.time()
@@ -69,32 +77,16 @@ def wait_for_connection(joystick, timeout=60):
             else:
                 options_press_time = None
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return None
+        # 每 3 秒嘗試連線一次
+        if time.time() >= next_retry:
+            ser = connect_serial()
+            if ser is not None:
+                return ser
+            remaining = int(deadline - time.time())
+            print(f"   ⏳ 剩餘 {remaining} 秒，3 秒後重試...", end="\r")
+            next_retry = time.time() + 3.0
 
-        ser = connect_serial()
-        if ser is not None:
-            return ser
-
-        print(f"   ⏳ 剩餘 {remaining} 秒，3 秒後重試...", end="\r")
-        wait_end = time.time() + 3.0
-        while time.time() < wait_end:
-            pygame.event.pump()
-            if joystick is not None:
-                if joystick.get_button(BTN_OPTIONS):
-                    if options_press_time is None:
-                        options_press_time = time.time()
-                        print("\n⚠️  偵測到中止指令，繼續按住 Options 3 秒...")
-                    elif time.time() - options_press_time >= 3.0:
-                        print("\n🛑 已中止等待。")
-                        return None
-                else:
-                    options_press_time = None
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    return None
-            time.sleep(0.1)
+        time.sleep(0.05)
 
     print(f"\n❌ 超過 {timeout} 秒仍無法連線，結束程式。")
     return None
