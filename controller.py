@@ -1,6 +1,7 @@
 import pygame
 import serial
 import time
+import threading
 
 # ==========================================
 # 🎛️ 試飛調音台 (專屬手感參數設定區)
@@ -35,10 +36,9 @@ def connect_serial():
         return None
 
 def send_packet(ser, packet):
-    """送封包，清 TX/RX buffer，失敗回傳 False"""
+    """送封包，清 RX buffer，失敗回傳 False"""
     try:
         ser.reset_input_buffer()
-        ser.reset_output_buffer()
         ser.write(packet)
         return True
     except Exception:
@@ -110,6 +110,18 @@ bt_serial = wait_for_connection(joystick, timeout=60)
 if bt_serial is None:
     pygame.quit()
     exit()
+
+# --- 背景重連 ---
+_serial_lock  = threading.Lock()
+_reconnecting = False
+
+def _do_reconnect():
+    global bt_serial, _reconnecting, reconnect_cooldown
+    new_ser = connect_serial()
+    with _serial_lock:
+        bt_serial = new_ser
+        _reconnecting = False
+        reconnect_cooldown = time.time() + 3.0
 
 # --- 系統變數初始化 ---
 base_throttle = 0
@@ -203,21 +215,25 @@ try:
         # 📦 打包發送（清空積壓封包，避免延遲堆疊）
         data_packet = b'S' + bytes([final_throttle, yaw_val, pitch_val, roll_val, gripper_val, arm_state])
 
-        if bt_serial is None or not bt_serial.is_open:
+        with _serial_lock:
+            _bt = bt_serial
+
+        if _bt is None or not _bt.is_open:
             now = time.time()
-            if now >= reconnect_cooldown:
-                print("\n🔄 藍牙斷線，嘗試重連...", end="\r")
-                bt_serial = connect_serial()
-                reconnect_cooldown = now + 3.0
+            if not _reconnecting and now >= reconnect_cooldown:
+                _reconnecting = True
+                print("\n🔄 藍牙斷線，背景嘗試重連...", end="\r")
+                threading.Thread(target=_do_reconnect, daemon=True).start()
         else:
-            ok = send_packet(bt_serial, data_packet)
+            ok = send_packet(_bt, data_packet)
             if not ok:
                 print("\n⚠️  串口寫入失敗，藍牙可能已斷線")
                 try:
-                    bt_serial.close()
+                    _bt.close()
                 except Exception:
                     pass
-                bt_serial = None
+                with _serial_lock:
+                    bt_serial = None
                 arm_state = 0  # 斷線時強制上鎖
 
         # 🖥️ 介面即時顯示

@@ -12,26 +12,32 @@ void setup() {
   Wire.begin();
 
   Serial.println("VL53L0X 初始化中...");
-  sensor.init();
+  if (!sensor.init()) {
+    Serial.println("偵測不到感測器！請檢查 A4/A5 接線。");
+    while (1) {}
+  }
   sensor.setTimeout(500);
-  sensor.setMeasurementTimingBudget(20000);
+
+  // 長距模式設定（可達約 2m，速度降為 ~10Hz）
+  sensor.setSignalRateLimit(0.1);
+  sensor.setVcselPulsePeriod(VL53L0X::VcselPeriodPreRange, 18);
+  sensor.setVcselPulsePeriod(VL53L0X::VcselPeriodFinalRange, 14);
+  sensor.setMeasurementTimingBudget(100000);  // 100ms
+
   sensor.startContinuous();
   Serial.println("就緒，開始回傳距離數值。");
 }
 
 void loop() {
-  int mm = sensor.readRangeContinuousMillimeters();
+  uint16_t mm = sensor.readRangeContinuousMillimeters();
 
   if (sensor.timeoutOccurred()) {
     BTSerial.println("TIMEOUT");
     Serial.println("TIMEOUT");
   } else {
-    // 格式："D:123\n"，Python 端解析
     BTSerial.print("D:");
     BTSerial.println(mm);
     Serial.print("D:");
     Serial.println(mm);
   }
-
-  delay(100);  // 10 Hz
 }

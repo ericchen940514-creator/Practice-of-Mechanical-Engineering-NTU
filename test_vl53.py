@@ -32,7 +32,7 @@ try:
                 mm = int(line[2:])
                 cm = mm / 10.0
                 bar = '█' * min(int(cm / 2), 50)  # 每 2cm 一格，最多 50 格
-                status = "✅" if 30 <= mm <= 1200 else "⚠️ 超出有效範圍"
+                status = "✅" if 30 <= mm <= 2000 else "⚠️ 超出有效範圍"
                 print(f"{status}  {mm:5d} mm  ({cm:5.1f} cm)  |{bar}", end="\r")
             except ValueError:
                 pass

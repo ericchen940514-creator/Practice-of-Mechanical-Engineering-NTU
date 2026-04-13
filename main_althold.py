@@ -3,6 +3,7 @@ import serial
 import time
 import sys
 import argparse
+import threading
 
 # ==========================================
 # 啟動參數
@@ -22,7 +23,7 @@ STEP_SPEED = 5
 DEAD_ZONE  = 0.05
 
 ALT_STEP_DEFAULT = 10   # D-pad 每按一次調整幾 cm
-ALT_MAX_CM       = 120  # VL53L0X 有效上限
+ALT_MAX_CM       = 120  # VL53L0X 長距模式，定高實用上限
 
 # 封包格式（8 bytes）：
 #   [S] [throttle 0~255] [yaw] [pitch] [roll] [target_alt 0~120cm] [arm_val] [ah_val]
@@ -58,7 +59,6 @@ def connect_serial():
 def send_packet(ser, packet):
     try:
         ser.reset_input_buffer()
-        ser.reset_output_buffer()
         ser.write(packet)
         return True
     except Exception:
@@ -425,6 +425,18 @@ channels = {'throttle': 0, 'target_alt': 0, 'yaw': 127, 'pitch': 127, 'roll': 12
 reconnect_cooldown = 0
 last_print_time    = 0
 
+# --- 背景重連 ---
+_serial_lock  = threading.Lock()
+_reconnecting = False
+
+def _do_reconnect():
+    global bt_serial, _reconnecting, reconnect_cooldown
+    new_ser = connect_serial()
+    with _serial_lock:
+        bt_serial = new_ser
+        _reconnecting = False
+        reconnect_cooldown = time.time() + 3.0
+
 if mode == 'gamepad':
     print("\n🎮 手把模式已上線！（定高版）")
     print("△=解鎖/上鎖  ○=定高切換  □=搖桿校準")
@@ -472,19 +484,22 @@ try:
             channels['ah_val'],         # 定高開關
         ])
 
-        connected = bt_serial is not None and bt_serial.is_open
+        with _serial_lock:
+            _bt = bt_serial
+        connected = _bt is not None and _bt.is_open
         if not connected:
             now = time.time()
-            if now >= reconnect_cooldown:
-                print("\n🔄 藍牙斷線，嘗試重連...", end="\r")
-                bt_serial = connect_serial()
-                reconnect_cooldown = now + 3.0
+            if not _reconnecting and now >= reconnect_cooldown:
+                _reconnecting = True
+                print("\n🔄 藍牙斷線，背景嘗試重連...", end="\r")
+                threading.Thread(target=_do_reconnect, daemon=True).start()
         else:
-            ok = send_packet(bt_serial, data_packet)
+            ok = send_packet(_bt, data_packet)
             if not ok:
                 print("\n⚠️  串口寫入失敗，藍牙可能已斷線")
-                safe_disconnect(bt_serial, state['gripper_val'])
-                bt_serial = None
+                safe_disconnect(_bt, state['gripper_val'])
+                with _serial_lock:
+                    bt_serial = None
                 state['arm_state'] = 0
                 state['alt_hold_active'] = False
                 reconnect_cooldown = time.time() + 3.0
