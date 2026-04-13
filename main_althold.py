@@ -4,6 +4,7 @@ import time
 import sys
 import argparse
 import threading
+from collections import deque
 
 # ==========================================
 # 啟動參數
@@ -58,15 +59,22 @@ def connect_serial():
 
 def send_packet(ser, packet):
     try:
-        ser.reset_input_buffer()
         ser.write(packet)
         return True
     except Exception:
         return False
 
+def make_packet(thr, yaw, pitch, roll, alt, grip, arm, ah):
+    """建立帶 XOR checksum 的封包（10 bytes）"""
+    payload = bytes([thr, yaw, pitch, roll, alt, grip, arm, ah])
+    chk = 0
+    for b in payload:
+        chk ^= b
+    return b'S' + payload + bytes([chk])
+
 def safe_disconnect(ser, gripper_val=127):
     """送出停機封包後再關閉連線"""
-    shutdown = b'S' + bytes([0, 127, 127, 127, 0, gripper_val, 0, 0])
+    shutdown = make_packet(0, 127, 127, 127, 0, gripper_val, 0, 0)
     for _ in range(3):
         try:
             ser.write(shutdown)
@@ -169,6 +177,9 @@ def read_gamepad(joystick, state):
     if curr_circle and not state['prev_circle']:
         state['alt_hold_active'] = not state['alt_hold_active']
         if state['alt_hold_active']:
+            snap = get_alt_snapshot()
+            if snap >= 0:
+                state['target_alt'] = int(max(5, min(ALT_MAX_CM, snap)))
             print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
             print("   D-pad 上/下 調整目標高度  |  D-pad 左/右 調整步進量")
         else:
@@ -277,6 +288,9 @@ def read_keyboard(keys, state):
     if curr_h and not state['prev_h']:
         state['alt_hold_active'] = not state['alt_hold_active']
         if state['alt_hold_active']:
+            snap = get_alt_snapshot()
+            if snap >= 0:
+                state['target_alt'] = int(max(5, min(ALT_MAX_CM, snap)))
             print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
             print("   Tab=高度↑  Shift=高度↓")
         else:
@@ -349,6 +363,10 @@ def draw_status(screen, font, state, mode, channels, connected):
     conn_color = (80, 220, 80) if connected else (220, 80, 80)
     ah_color   = (80, 180, 255) if state['alt_hold_active'] else (160, 160, 160)
 
+    with _alt_lock:
+        cur_alt = _current_alt
+    alt_str = f"{cur_alt:.1f} cm" if cur_alt >= 0 else "---"
+
     if state['alt_hold_active']:
         throttle_str = f"目標高度: {state['target_alt']:3d} cm (步進:{state['alt_step']:2d}cm)"
     else:
@@ -359,8 +377,10 @@ def draw_status(screen, font, state, mode, channels, connected):
          f"連線: {'連線中' if connected else '斷線'}   "
          f"狀態: {'解鎖' if state['arm_state'] == 255 else '上鎖'}",
          conn_color),
-        (f"定高: {'開啟 🔒' if state['alt_hold_active'] else '關閉'}   " + throttle_str,
+        (f"定高: {'開啟' if state['alt_hold_active'] else '關閉'}   " + throttle_str,
          ah_color),
+        (f"當前高度: {alt_str}",
+         (255, 220, 60)),
         (f"夾爪: {state['gripper_val']:3d}  (L1/R1)   Y: {channels['yaw']:3d}  P: {channels['pitch']:3d}  R: {channels['roll']:3d}   COM: {COM_PORT}",
          (180, 180, 180)),
         ("○/H=定高切換  D-pad=高度/油門  Options/X長按3秒=退出  4+6=緊急停機",
@@ -391,7 +411,7 @@ except Exception:
     mode = 'keyboard'
     print("ℹ️  未偵測到手把  → 鍵盤模式")
 
-screen = pygame.display.set_mode((600, 130))
+screen = pygame.display.set_mode((600, 158))
 pygame.display.set_caption(f"無人機控制站（定高版）[{COM_PORT}] — {'手把' if mode == 'gamepad' else '鍵盤'}模式")
 font  = pygame.font.SysFont("Microsoft JhengHei", 18)
 clock = pygame.time.Clock()
@@ -429,6 +449,44 @@ last_print_time    = 0
 _serial_lock  = threading.Lock()
 _reconnecting = False
 
+# --- 當前高度（由 Arduino 回傳） ---
+_alt_lock    = threading.Lock()
+_current_alt = -1        # -1 表示尚未收到資料
+_alt_history = deque(maxlen=10)   # 最近 10 筆（約 2 秒）供切入定高時取平均
+
+def get_alt_snapshot():
+    """回傳近 2 秒平均高度；若無資料則回傳 -1。"""
+    with _alt_lock:
+        if not _alt_history:
+            return _current_alt
+        return round(sum(_alt_history) / len(_alt_history), 1)
+
+def _serial_reader():
+    """
+    背景讀取 Arduino 回傳的高度資料。
+    協議：Arduino 送出文字行 "D:<mm>\\n"（與 sketch_vl53_test 相同格式）
+    例如 "D:470\\n" → 47.0 cm
+    """
+    global _current_alt
+    while True:
+        with _serial_lock:
+            ser = bt_serial
+        if ser is None or not ser.is_open:
+            time.sleep(0.1)
+            continue
+        try:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if line.startswith('D:'):
+                mm = int(line[2:])
+                val = round(mm / 10.0, 1)
+                with _alt_lock:
+                    _current_alt = val
+                    _alt_history.append(val)
+        except (ValueError, UnicodeDecodeError):
+            pass
+        except Exception:
+            time.sleep(0.05)
+
 def _do_reconnect():
     global bt_serial, _reconnecting, reconnect_cooldown
     new_ser = connect_serial()
@@ -436,6 +494,8 @@ def _do_reconnect():
         bt_serial = new_ser
         _reconnecting = False
         reconnect_cooldown = time.time() + 3.0
+
+threading.Thread(target=_serial_reader, daemon=True).start()
 
 if mode == 'gamepad':
     print("\n🎮 手把模式已上線！（定高版）")
@@ -460,7 +520,7 @@ try:
             if estop:
                 print("\n🚨 [緊急停機] 觸發！立即送出停機指令...")
                 if bt_serial and bt_serial.is_open:
-                    estop_pkt = b'S' + bytes([0, 127, 127, 127, 0, state['gripper_val'], 0, 0])
+                    estop_pkt = make_packet(0, 127, 127, 127, 0, state['gripper_val'], 0, 0)
                     for _ in range(5):
                         send_packet(bt_serial, estop_pkt)
                 raise KeyboardInterrupt
@@ -471,9 +531,9 @@ try:
         if should_exit:
             break
 
-        # 打包（9 bytes）
+        # 打包（10 bytes）：S + 8 bytes payload + 1 byte XOR checksum
         # Gripper 由 Arduino 直接驅動伺服馬達（D6），不經過 IBUS 飛控
-        data_packet = b'S' + bytes([
+        data_packet = make_packet(
             channels['throttle'],       # 當前真實油門（Arduino 以此為 PID base_throttle）
             channels['yaw'],
             channels['pitch'],
@@ -482,7 +542,7 @@ try:
             state['gripper_val'],       # 夾爪（Arduino 本地驅動）
             state['arm_state'],
             channels['ah_val'],         # 定高開關
-        ])
+        )
 
         with _serial_lock:
             _bt = bt_serial
@@ -509,7 +569,10 @@ try:
             conn_str = "連線中" if connected else "斷線中"
             arm_str  = "解鎖" if state['arm_state'] == 255 else "上鎖"
             ah_str   = f"定高:{state['target_alt']}cm" if state['alt_hold_active'] else f"手動:{channels['throttle']:3d}"
-            print(f"[{conn_str}] {arm_str} | {ah_str} | 夾爪:{state['gripper_val']:3d} | Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}", end="\r")
+            with _alt_lock:
+                cur = _current_alt
+            cur_str = f"{cur:.1f}cm" if cur >= 0 else "  ---"
+            print(f"[{conn_str}] {arm_str} | {ah_str} | 當前:{cur_str} | 夾爪:{state['gripper_val']:3d} | Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}", end="\r")
             last_print_time = now
 
         draw_status(screen, font, state, mode, channels, connected)

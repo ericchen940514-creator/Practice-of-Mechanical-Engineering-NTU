@@ -33,6 +33,11 @@ float integral        = 0;
 int   base_throttle   = 1500;
 unsigned long last_pid_time = 0;
 
+// 當前感測高度快取（整個 loop 共用，避免重複讀取感測器）
+int   current_raw_mm  = -1;
+unsigned long last_sensor_time = 0;
+unsigned long last_alt_report  = 0;
+
 const float Kp = 2.5;
 const float Ki = 0.05;
 const float Kd = 6.0;
@@ -61,14 +66,13 @@ void sendIBUS() {
 // ─────────────────────────────────────────
 // 定高 PID 迴圈（50Hz 更新）
 // ─────────────────────────────────────────
-void updateAltHold() {
+void updateAltHold(int raw_mm) {
   unsigned long now = millis();
   float dt = (now - last_pid_time) / 1000.0f;
   if (dt < 0.02f) return;
   last_pid_time = now;
 
-  int raw_mm = altSensor.readRangeContinuousMillimeters();
-  if (altSensor.timeoutOccurred()) return;
+  if (raw_mm < 0) return;  // 尚無有效讀數
   float current_alt_cm = raw_mm / 10.0f;
 
   if (current_alt_cm < 3 || current_alt_cm > 130) return;
@@ -86,6 +90,14 @@ void updateAltHold() {
 }
 
 // ─────────────────────────────────────────
+// 非阻塞式感測器就緒檢查
+// VL53L0X 連續模式：RESULT_INTERRUPT_STATUS (0x13) 低 3 bits 非 0 表示新資料就緒
+// ─────────────────────────────────────────
+bool sensorDataReady() {
+  return (altSensor.readReg(0x13) & 0x07) != 0;
+}
+
+// ─────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   BTSerial.begin(9600);
@@ -93,7 +105,7 @@ void setup() {
   gripper_servo.attach(6);
 
   altSensor.init();
-  altSensor.setTimeout(300);
+  altSensor.setTimeout(50);            // 最多等 50ms（原本 300ms），限制 blocking 時間
   altSensor.setMeasurementTimingBudget(20000);
   altSensor.startContinuous();
 }
@@ -110,16 +122,24 @@ void setup() {
 //   [7] ah_val     定高開關 (0=手動, 1=定高)
 // ─────────────────────────────────────────
 void loop() {
-  while (BTSerial.available() >= 9) {
+  while (BTSerial.available() >= 10) {
     if (BTSerial.read() == 'S') {
-      int thr_val = BTSerial.read();   // 當前油門 0~255
-      int y_val   = BTSerial.read();
-      int p_val   = BTSerial.read();
-      int r_val   = BTSerial.read();
-      int alt_val = BTSerial.read();   // 目標高度 cm（定高時有效）
-      int g_val   = BTSerial.read();   // 夾爪
-      int arm_val = BTSerial.read();
-      int ah_val  = BTSerial.read();
+      uint8_t buf[9];
+      for (int i = 0; i < 9; i++) buf[i] = BTSerial.read();
+
+      // XOR checksum 驗證（前 8 bytes XOR 應等於第 9 byte）
+      uint8_t chk = 0;
+      for (int i = 0; i < 8; i++) chk ^= buf[i];
+      if (chk != buf[8]) continue;   // 封包損壞，丟棄，不更新 IBUS
+
+      int thr_val = buf[0];
+      int y_val   = buf[1];
+      int p_val   = buf[2];
+      int r_val   = buf[3];
+      int alt_val = buf[4];   // 目標高度 cm（定高時有效）
+      int g_val   = buf[5];   // 夾爪
+      int arm_val = buf[6];
+      int ah_val  = buf[7];
 
       // Roll / Pitch / Yaw / ARM 照常更新（送飛控）
       ibus_channels[0] = map(r_val, 0, 255, 1000, 2000);
@@ -165,9 +185,25 @@ void loop() {
     }
   }
 
+  // 感測器讀取（非阻塞，資料 ready 才讀，避免 block IBUS 心跳）
+  if (millis() - last_sensor_time >= 20 && sensorDataReady()) {
+    last_sensor_time = millis();
+    int mm = altSensor.readRangeContinuousMillimeters();
+    if (!altSensor.timeoutOccurred()) {
+      current_raw_mm = mm;
+    }
+  }
+
   // 定高 PID 更新
   if (alt_hold_active) {
-    updateAltHold();
+    updateAltHold(current_raw_mm);
+  }
+
+  // 每 200ms 回傳當前高度給 PC（格式與 sketch_vl53_test 相同：D:<mm>）
+  if (millis() - last_alt_report >= 200 && current_raw_mm > 0) {
+    BTSerial.print("D:");
+    BTSerial.println(current_raw_mm);
+    last_alt_report = millis();
   }
 
   // IBUS 心跳：每 20ms 發一次
