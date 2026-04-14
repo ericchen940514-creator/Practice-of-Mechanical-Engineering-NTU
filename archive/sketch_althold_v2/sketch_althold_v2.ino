@@ -35,6 +35,7 @@ unsigned long last_pid_time = 0;
 
 // 當前感測高度快取（整個 loop 共用，避免重複讀取感測器）
 int   current_raw_mm  = -1;
+bool  sensor_ok       = false;   // VL53L0X 是否成功初始化
 unsigned long last_sensor_time = 0;
 unsigned long last_alt_report  = 0;
 
@@ -104,10 +105,12 @@ void setup() {
   Wire.begin();
   gripper_servo.attach(6);
 
-  altSensor.init();
-  altSensor.setTimeout(50);            // 最多等 50ms（原本 300ms），限制 blocking 時間
-  altSensor.setMeasurementTimingBudget(20000);
-  altSensor.startContinuous();
+  sensor_ok = altSensor.init();
+  if (sensor_ok) {
+    altSensor.setTimeout(50);
+    altSensor.setMeasurementTimingBudget(20000);
+    altSensor.startContinuous();
+  }
 }
 
 // ─────────────────────────────────────────
@@ -154,8 +157,8 @@ void loop() {
       // ── 定高狀態機 ──
       if (ah_val == 1 && !alt_hold_active) {
         // 【剛切入定高】以當前油門為懸停基準，以當下感測高度為目標
-        int raw_mm = altSensor.readRangeContinuousMillimeters();
-        if (!altSensor.timeoutOccurred() && raw_mm > 30 && raw_mm < 1300) {
+        int raw_mm = sensor_ok ? altSensor.readRangeContinuousMillimeters() : 0;
+        if (sensor_ok && !altSensor.timeoutOccurred() && raw_mm > 30 && raw_mm < 1300) {
           target_alt_cm   = raw_mm / 10.0f;         // 先用真實高度
           base_throttle   = map(thr_val, 0, 255, 1000, 2000);  // 用真實油門
           integral        = 0;
@@ -186,7 +189,7 @@ void loop() {
   }
 
   // 感測器讀取（非阻塞，資料 ready 才讀，避免 block IBUS 心跳）
-  if (millis() - last_sensor_time >= 20 && sensorDataReady()) {
+  if (sensor_ok && millis() - last_sensor_time >= 20 && sensorDataReady()) {
     last_sensor_time = millis();
     int mm = altSensor.readRangeContinuousMillimeters();
     if (!altSensor.timeoutOccurred()) {
@@ -194,13 +197,23 @@ void loop() {
     }
   }
 
-  // 定高 PID 更新
+  // 定高 PID 更新（無感測器時強制關閉定高）
   if (alt_hold_active) {
-    updateAltHold(current_raw_mm);
+    if (sensor_ok) {
+      updateAltHold(current_raw_mm);
+    } else {
+      alt_hold_active = false;   // 沒感測器不能定高，自動回手動
+    }
   }
 
-  // 每 200ms 回傳當前高度給 PC（格式與 sketch_vl53_test 相同：D:<mm>）
-  if (millis() - last_alt_report >= 200 && current_raw_mm > 0) {
+  // 每 200ms 回傳當前高度給 PC
+  // 必須在 IBUS 封包傳完後才送（32 bytes @ 115200 ≈ 2.8ms），加 5ms 餘裕
+  // BTSerial TX（SoftwareSerial）會關中斷 ~8ms，需在下一個 IBUS（20ms）前結束
+  // 條件：距上次 IBUS 已過 5ms（傳完），且再過 8ms（BTSerial TX）仍 < 20ms
+  unsigned long since_ibus = millis() - last_ibus_time;
+  if (sensor_ok && current_raw_mm > 0 &&
+      millis() - last_alt_report >= 200 &&
+      since_ibus >= 5 && since_ibus <= 12) {
     BTSerial.print("D:");
     BTSerial.println(current_raw_mm);
     last_alt_report = millis();
