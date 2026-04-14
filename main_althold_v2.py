@@ -196,11 +196,11 @@ def read_gamepad(joystick, state):
             state['target_alt'] = max(5, state['target_alt'] - state['alt_step'])
             print(f"\n📡 目標高度 → {state['target_alt']} cm")
         if curr_right and not state['prev_right']:
-            state['alt_step'] = min(30, state['alt_step'] + 5)
-            print(f"\n📐 高度步進 → {state['alt_step']} cm")
+            state['target_alt'] = min(ALT_MAX_CM, state['target_alt'] + 3)
+            print(f"\n📡 目標高度 → {state['target_alt']} cm")
         if curr_left  and not state['prev_left']:
-            state['alt_step'] = max(5, state['alt_step'] - 5)
-            print(f"\n📐 高度步進 → {state['alt_step']} cm")
+            state['target_alt'] = max(5, state['target_alt'] - 3)
+            print(f"\n📡 目標高度 → {state['target_alt']} cm")
     else:
         if curr_up    and not state['prev_up']:
             state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
@@ -373,7 +373,7 @@ def draw_status(screen, font, state, mode, channels, connected):
         (f"夾爪: {state['gripper_val']:3d} (L1/R1) Y: {channels['yaw']:3d} "
          f"P: {channels['pitch']:3d} R: {channels['roll']:3d} COM: {COM_PORT}",
          (180, 180, 180)),
-        ("○/H=定高切換 D-pad=高度/油門 Options/X長按3秒=退出 4+6=緊急停機",
+        ("○/H=定高切換 定高:上下=大步 左右=±3cm 手動:上下=油門 Options/X長按3秒=退出 4+6=緊急停機",
          (110, 110, 110)),
     ]
     for i, (text, color) in enumerate(lines):
@@ -495,7 +495,7 @@ threading.Thread(target=_serial_reader, daemon=True).start()
 if mode == 'gamepad':
     print("\n🎮 手把模式已上線！（定高版）")
     print("△=解鎖/上鎖 ○=定高切換 □=搖桿校準")
-    print("定高開啟時：D-pad上下=目標高度± D-pad左右=步進量±")
+    print("定高開啟時：D-pad上下=目標高度±大步 D-pad左右=目標高度±3cm")
     print("手動模式時：D-pad上下=基準油門± Options長按3秒=退出 4+6=緊急停機\n")
 else:
     print("\n⌨️ 鍵盤模式已上線！（定高版）")
