@@ -382,7 +382,12 @@ try:
 
         # 讀取輸入
         if mode == 'gamepad':
-            channels, should_exit, estop = read_gamepad(joystick, state)
+            try:
+                channels, should_exit, estop = read_gamepad(joystick, state)
+            except pygame.error as e:
+                print(f"\n⚠️ 手把讀取失敗（{e}），安全退出...")
+                should_exit, estop = True, False
+                channels = {'throttle': 0, 'yaw': 127, 'pitch': 127, 'roll': 127}
             if estop:
                 print("\n🚨 [緊急停機] 觸發！立即送出停機指令...")
                 if bt_serial and bt_serial.is_open:
@@ -432,15 +437,21 @@ try:
         if not state['is_exiting'] and now - last_print_time >= 0.2:
             conn_str = "連線中" if connected else "斷線中"
             arm_str  = "解鎖" if state['arm_state'] == 255 else "上鎖"
-            print(f"[{conn_str}] {arm_str} | 基準:{state['base_throttle']:3d}(步進:{state['throttle_step']:2d}) | 油門:{channels['throttle']:3d} | 夾爪:{state['gripper_val']:3d} | Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}", end="\r")
+            print(f"[{conn_str}] {arm_str} | 基準:{state['base_throttle']:3d}(步進:{state['throttle_step']:2d}) | 油門:{channels['throttle']:3d} | 夾爪:{state['gripper_val']:3d} | Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}",
+                  end="\r", flush=True)
             last_print_time = now
 
         # 視窗繪製
-        draw_status(screen, font, state, mode, channels, connected)
+        try:
+            draw_status(screen, font, state, mode, channels, connected)
+        except pygame.error:
+            pass
         clock.tick(25)
 
 except KeyboardInterrupt:
     print("\n🛑 任務中止（Ctrl+C）。")
+except pygame.error as e:
+    print(f"\n💥 pygame 錯誤導致程式終止：{e}")
 finally:
     print("\n🔌 正在關閉連線...")
     if bt_serial is not None and bt_serial.is_open:

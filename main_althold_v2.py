@@ -510,7 +510,13 @@ try:
                 keydowns.add(event.key)
 
         if mode == 'gamepad':
-            channels, should_exit, estop = read_gamepad(joystick, state)
+            try:
+                channels, should_exit, estop = read_gamepad(joystick, state)
+            except pygame.error as e:
+                print(f"\n⚠️ 手把讀取失敗（{e}），安全退出...")
+                should_exit, estop = True, False
+                channels = {'throttle': 0, 'target_alt': 0,
+                            'yaw': 127, 'pitch': 127, 'roll': 127, 'ah_val': 0}
             if estop:
                 print("\n🚨 [緊急停機] 觸發！立即送出停機指令...")
                 if bt_serial and bt_serial.is_open:
@@ -571,14 +577,20 @@ try:
             cur_str = f"{cur:.1f}cm" if cur >= 0 else " ---"
             print(f"[{conn_str}] {arm_str} | {ah_str} | 當前:{cur_str} | "
                   f"基準:{current_base:3d} | 夾爪:{state['gripper_val']:3d} | "
-                  f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}", end="\r")
+                  f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}",
+                  end="\r", flush=True)
             last_print_time = now
 
-        draw_status(screen, font, state, mode, channels, connected)
+        try:
+            draw_status(screen, font, state, mode, channels, connected)
+        except pygame.error:
+            pass
         clock.tick(25)
 
 except KeyboardInterrupt:
     print("\n🛑 任務中止（Ctrl+C）。")
+except pygame.error as e:
+    print(f"\n💥 pygame 錯誤導致程式終止：{e}")
 
 finally:
     print("\n🔌 正在關閉連線...")
