@@ -100,10 +100,14 @@ def wait_for_connection(mode, joystick=None, timeout=60):
                 return None
 
         if mode == 'gamepad' and joystick:
-            if joystick.get_button(BTN_ESTOP_A) and joystick.get_button(BTN_ESTOP_B):
-                print("\n🚨 緊急停機觸發，中止等待。")
+            try:
+                if joystick.get_button(BTN_ESTOP_A) and joystick.get_button(BTN_ESTOP_B):
+                    print("\n🚨 緊急停機觸發，中止等待。")
+                    return None
+                held = joystick.get_button(BTN_OPTIONS)
+            except pygame.error:
+                print("\n⚠️ 手把斷線，中止等待。")
                 return None
-            held = joystick.get_button(BTN_OPTIONS)
         else:
             keys = pygame.key.get_pressed()
             held = keys[pygame.K_x]
