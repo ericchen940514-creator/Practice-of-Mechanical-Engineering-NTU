@@ -1,23 +1,6 @@
-# 定高模式實驗指南（實驗性功能）
+# 定高模式實驗指南（v0.4.14.1）
 
-> ⚠️ **實驗性功能**：此功能尚未經過完整飛行測試，PID 參數需要依實際飛行狀況調整。請在安全環境下低空測試，並隨時準備切回手動模式或觸發緊急停機。
-
----
-
-## 概覽
-
-利用 **VL53L0X** 雷射測距感測器量測對地高度，搭配 Arduino 上的 PID 控制器自動維持目標高度。  
-地面端透過 `main_althold.py` 控制，D-pad 可在飛行中即時調整目標高度。
-
-```
-[手把 D-pad] → [main_althold.py] --藍牙--> [Arduino sketch_althold_v2]
-                                                  |
-                                            VL53L0X 讀取高度
-                                                  |
-                                            PID 調整油門
-                                                  |
-                                            IBUS → 飛控
-```
+> ⚠️ **實驗性功能**：尚未經過完整飛行測試，PID 參數需依實際飛行狀況調整。請在安全環境下低空測試，並隨時準備切回手動模式或觸發緊急停機。
 
 ---
 
@@ -25,10 +8,73 @@
 
 | 檔案 | 說明 |
 |------|------|
-| `sketch_althold_v2/sketch_althold_v2.ino` | Arduino 韌體（含 PID 定高邏輯） |
-| `main_althold.py` | 地面端控制程式（含定高切換） |
+| `sketch_althold_v3/sketch_althold_v3.ino` | Arduino 韌體（定高狀態機、PID、EMA 濾波） |
+| `main_althold_v2.py` | Python 地面站（定高切換、雙向藍牙同步） |
+| `archive/sketch_althold_v2/` | 舊版韌體（封存備用） |
+| `archive/main_althold.py` | 舊版地面站（封存備用） |
 
-> 原本的 `sketch_mar26a.ino` 與 `main.py` 完全未修改，可隨時切回使用。
+---
+
+## 系統架構
+
+### 通訊總迴圈
+
+```
+【Python 地面控制站】                              【Arduino（無人機端）】
+        │                                                  │
+        ├─ 1. 讀取手把／鍵盤輸入                            ├─ 1. 讀取 VL53L0X 高度（每 20ms）
+        │                                                  │    └─ EMA 低通濾波（ALPHA=0.15）
+        ├─ 2. 打包控制指令                                  │
+        │    S + 8 bytes payload + XOR checksum            │
+        │  ─────────────────── 藍牙封包 ─────────────────>│
+        │                                                  ├─ 2. 解析封包，驗證 XOR checksum
+        │                                                  │
+        │                                                  ├─ 3. 進入定高狀態機（見下方）
+        │                                                  │    └─ PID 運算（50Hz，獨立於封包）
+        │                                                  │
+        │                                                  ├─ 4. IBUS 輸出給飛控（50Hz）
+        │                                                  │
+        │<────────────── D:<高度 mm>（每 200ms）───────────┤
+        │<────────────── T:<IBUS 油門>（退出定高時一次）────┤
+        │                                                  │
+        └─ 3. 背景執行緒接收數據，更新 UI 與基準油門          V
+        V                                             （重複 loop）
+   （重複 loop）
+```
+
+### Arduino 定高狀態機
+
+每次收到藍牙封包後，依 `ah_val`（Python 傳來）與 `alt_hold_active`（Arduino 內部）進入四個分支：
+
+| 分支 | ah_val | alt_hold_active | 觸發時機 |
+|------|--------|-----------------|----------|
+| A | 0 | True | 按下 ○，**關閉定高的瞬間** |
+| B | 0 | False | 定高關閉後的正常手動飛行 |
+| C | 1 | False | 按下 ○，**切入定高的瞬間** |
+| D | 1 | True | 定高開啟中的每一幀 |
+
+**分支 A：關閉定高**
+1. 攔截 PID 最後一刻的輸出油門值（`exit_thr`）
+2. 關閉 `alt_hold_active`
+3. 透過藍牙發送 `T:<exit_thr>` 給 Python，同步為新的手動基準油門（無縫切換，防掉高）
+4. 輸出該油門值給飛控
+
+**分支 B：手動模式**
+- 直接將搖桿油門（`manual_throttle`）輸出給 IBUS
+
+**分支 C：切入定高**
+1. 確認 `sensor_ok` 且 `filtered_mm` 在有效範圍（3～130 cm）
+2. 快照當下 **EMA 濾波後的高度**，設為 `target_alt_cm`
+3. 快照當下搖桿油門，鎖死為 `base_throttle`（定高期間不再更新）
+4. 重置 PID 所有狀態（`integral`、`last_error`、`d_filtered`）
+5. 開啟 `alt_hold_active`
+
+**分支 D：定高維持**
+- 封包處理：若目標高度變化 > 0.5 cm，更新 `target_alt_cm` 並重置積分（防過衝）
+- PID 獨立運算（每次 loop，`dt < 20ms` 限速）：
+  - 最終油門 = 鎖死的 `base_throttle` + PID 補償值
+
+> **注意**：PID 運算與封包處理是程式碼中兩個獨立的 `if` block，PID 不依賴封包到來才執行。
 
 ---
 
@@ -51,8 +97,6 @@
 
 ## Arduino IDE 函式庫安裝
 
-需額外安裝一個外部函式庫，其餘皆為 Arduino 內建：
-
 | 函式庫 | 來源 | 安裝方式 |
 |--------|------|----------|
 | `VL53L0X` by Pololu | 外部 | 函式庫管理員搜尋安裝 |
@@ -61,42 +105,40 @@
 | `Wire.h` | 內建 | 不需安裝 |
 
 **安裝步驟：**
-
 1. Arduino IDE → 草稿碼 → 包含函式庫 → **管理函式庫**
-2. 搜尋 `VL53L0X`
-3. 找到 **VL53L0X by Pololu** → 點**安裝**
+2. 搜尋 `VL53L0X`，找到 **VL53L0X by Pololu** → 點**安裝**
 
 ---
 
-## 通訊協議（與原版的差異）
+## 通訊協議
 
-原版協議（7 bytes）：
-
-```
-S | Throttle | Yaw | Pitch | Roll | Gripper | Arm
-```
-
-定高版協議（9 bytes）：
+封包格式（10 bytes）：
 
 ```
-S | Throttle | Yaw | Pitch | Roll | TargetAlt | Gripper | Arm | ah_val
+S | thr | yaw | pitch | roll | target_alt | gripper | arm | ah_val | XOR_checksum
 ```
 
 | 欄位 | 說明 |
 |------|------|
-| `Throttle` | 當前真實油門（0～255），**每包都送**，Arduino 以此為 PID 懸停基準 |
-| `TargetAlt` | 目標高度 cm（0～120）；手動模式時送 0 |
-| `Gripper` | 夾爪開合程度（0～255）；Arduino 直接驅動伺服馬達（D6），**不經過 IBUS 飛控** |
+| `thr` | 搖桿油門（0～255）；定高時送固定 base_throttle，手動時送實際搖桿值 |
+| `target_alt` | 目標高度 cm（0～120）；手動時送 0 |
+| `gripper` | 夾爪開合（0～255）；Arduino 直接驅動 D6 伺服馬達，**不經過 IBUS 飛控** |
 | `ah_val` | 定高開關：0 = 手動，1 = 定高 |
+| `XOR_checksum` | 前 8 bytes 逐位元 XOR，封包損壞直接丟棄 |
 
-> **與舊版的關鍵差異**：`Throttle` 在每一包都送出真實值。切入定高時 Arduino 直接以當前油門為懸停基準，不會有瞬間掉高度的問題。
+### Arduino → Python 回傳
+
+| 格式 | 觸發時機 | 說明 |
+|------|----------|------|
+| `D:<mm>\n` | 每 200ms | 當前 EMA 濾波後高度（單位 mm） |
+| `T:<ibus>\n` | 退出定高時一次 | PID 最後輸出的 IBUS 油門值（1000～2000），Python 換算後設為新基準油門 |
 
 ---
 
 ## 啟動方式
 
 ```bash
-python main_althold.py --port COM4
+python main_althold_v2.py --port COM4
 ```
 
 ---
@@ -110,7 +152,7 @@ python main_althold.py --port COM4
 | **△（Triangle）** | 解鎖 / 上鎖 |
 | **○（Circle）** | 切換定高開 / 關 |
 | **□（Square）** | 搖桿校準（手動模式下） |
-| **L1 / R1** | 夾爪閉合 / 張開（Arduino 直接驅動，不經過飛控）|
+| **L1 / R1** | 夾爪閉合 / 張開 |
 | **Options 長按 3 秒** | 安全退出 |
 | **按鍵 4 + 6 同時** | 🚨 緊急停機 |
 
@@ -136,38 +178,52 @@ python main_althold.py --port COM4
 |------|------|
 | **H** | 切換定高開 / 關 |
 | **Tab / Shift** | 定高時：目標高度 ± / 手動時：基準油門 ± |
+| **C / Z** | 油門步進量 ±1（手動時） |
 | **W / S** | 油門增減 |
 | **A / D** | 偏航 |
 | **↑ ↓** | 俯仰 |
 | **← →** | 翻滾 |
 | **R** | 解鎖 / 上鎖 |
+| **Q / E** | 夾爪閉合 / 張開 |
 | **X 長按 3 秒** | 安全退出 |
 
 ---
 
 ## 定高 PID 參數
 
-位於 `sketch_althold_v2.ino` 第 36～38 行：
+位於 `sketch_althold_v3.ino`：
 
 ```cpp
-const float Kp = 2.5;   // 比例：越大反應越快，過大會震盪
-const float Ki = 0.05;  // 積分：補償穩態誤差
-const float Kd = 6.0;   // 微分：抑制震盪，感測器雜訊大時調小
+const float Kp    = 2.5;   // 比例：越大反應越快，過大會震盪
+const float Ki    = 0.05;  // 積分：補償穩態誤差
+const float Kd    = 0.8;   // 微分：已加低通濾波，不需像舊版設很大
+const float ALPHA = 0.15;  // 感測器 EMA 濾波係數（越小越平滑，延遲越高）
+const float BETA  = 0.2;   // D 項低通濾波係數（越小越平滑）
 ```
+
+### 與舊版（v2）的差異
+
+| 項目 | v2 | v3（現行） |
+|------|----|------------|
+| Kd | 6.0（無濾波） | 0.8（加 D 項低通） |
+| 感測器輸入 | 原始 mm 值 | EMA 濾波後的浮點值 |
+| base_throttle | 定高中持續跟著搖桿更新 | 切入時鎖死，定高中不再更新 |
+| 退出定高 | 直接用搖桿位置，可能跳油門 | 回傳 PID 最後輸出，Python 無縫接手 |
+| sensor_ok 保護 | 僅檢查 init() | init() + startContinuous() 全鏈路保護 |
 
 ### 調參建議順序
 
 1. 先把 `Ki`、`Kd` 設為 0，只調 `Kp` 到能大致保持高度
-2. 若高度有穩態誤差（飄高或飄低），再慢慢加 `Ki`
-3. 若上下震盪，加 `Kd` 抑制；若 VL53L0X 雜訊導致抖動，則調小 `Kd`
+2. 若有穩態誤差（持續飄高或飄低），慢慢加 `Ki`
+3. 若上下震盪，加 `Kd`；若感測器雜訊仍大，調小 `BETA`（D 項更平滑）或調小 `ALPHA`（感測器更平滑）
 
 ---
 
 ## 建議測試流程
 
 1. 確認 VL53L0X 接線正確（**3.3V，非 5V**）
-2. 燒錄 `sketch_althold_v2.ino`，用 Serial Monitor 確認感測器有讀值
-3. 執行 `main_althold.py`，確認藍牙連線正常
+2. 燒錄 `sketch_althold_v3.ino`，用 `test_vl53.py` 確認感測器讀值正常
+3. 執行 `main_althold_v2.py`，確認藍牙連線正常且 UI 顯示當前高度
 4. 在草地或軟墊上，**手動起飛**至約 40～60 cm 懸停穩定
 5. 按 **○** 切入定高，觀察油門是否自動調節
 6. 按 **D-pad 上** 讓無人機爬升 10 cm，觀察行為
@@ -180,4 +236,4 @@ const float Kd = 6.0;   // 微分：抑制震盪，感測器雜訊大時調小
 - VL53L0X 有效範圍 **3～120 cm**，超出範圍時 PID 暫停更新，保持上一次油門
 - 感測器朝下安裝，地面需平整（草地可能影響讀值穩定性）
 - 飛行速度過快或傾斜角過大時，感測器讀值會偏差
-- 目前尚無飛行記錄，PID 參數（Kp=2.5, Ki=0.05, Kd=6.0）為初始估計值，**必須實飛調整**
+- 目前尚無飛行記錄，PID 參數為初始估計值，**必須實飛調整**
