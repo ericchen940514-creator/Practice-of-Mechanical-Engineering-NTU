@@ -255,7 +255,12 @@ def read_gamepad(joystick, state):
     }
     return channels, should_exit, False
 
-def read_keyboard(keys, state):
+def read_keyboard(keys, keydowns, state):
+    """
+    keys     : pygame.key.get_pressed()，用於連續控制與長按偵測
+    keydowns : 本幀的 KEYDOWN 事件集合，用於一次性觸發（含 key repeat）
+    """
+    # X 長按 3 秒退出（時間偵測，需要 get_pressed）
     should_exit = False
     if keys[pygame.K_x]:
         if not state['is_exiting']:
@@ -269,7 +274,7 @@ def read_keyboard(keys, state):
             state['is_exiting'] = False
             print("\n✅ 已放開 X 鍵，退出指令取消。")
 
-    # H 鍵：切換定高
+    # H：切換定高（toggle，用 get_pressed + prev_h 避免重複觸發）
     curr_h = keys[pygame.K_h]
     if curr_h and not state['prev_h']:
         state['alt_hold_active'] = not state['alt_hold_active']
@@ -286,30 +291,23 @@ def read_keyboard(keys, state):
             print("\n🔓 定高關閉，回手動模式（等待 Arduino 同步基準油門）")
     state['prev_h'] = curr_h
 
-    curr_tab   = keys[pygame.K_TAB]
-    curr_shift = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
-    curr_c     = keys[pygame.K_c]
-    curr_z     = keys[pygame.K_z]
-
+    # Tab / Shift / C / Z：用 KEYDOWN 事件（每次觸發一步，支援長按自動重複）
     if state['alt_hold_active']:
-        if curr_tab   and not state['prev_tab']:
+        if pygame.K_TAB in keydowns:
             state['target_alt'] = min(ALT_MAX_CM, state['target_alt'] + state['alt_step'])
             print(f"\n📡 目標高度 → {state['target_alt']} cm")
-        if curr_shift and not state['prev_shift']:
+        if pygame.K_LSHIFT in keydowns or pygame.K_RSHIFT in keydowns:
             state['target_alt'] = max(5, state['target_alt'] - state['alt_step'])
             print(f"\n📡 目標高度 → {state['target_alt']} cm")
     else:
-        if curr_tab   and not state['prev_tab']:
+        if pygame.K_TAB in keydowns:
             state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
-        if curr_shift and not state['prev_shift']:
-            state['base_throttle'] = max(0,   state['base_throttle'] - state['throttle_step'])
-        if curr_c     and not state['prev_c']:
+        if pygame.K_LSHIFT in keydowns or pygame.K_RSHIFT in keydowns:
+            state['base_throttle'] = max(0, state['base_throttle'] - state['throttle_step'])
+        if pygame.K_c in keydowns:
             state['throttle_step'] = min(20, state['throttle_step'] + 1)
-        if curr_z     and not state['prev_z']:
-            state['throttle_step'] = max(1,  state['throttle_step'] - 1)
-
-    state['prev_tab'],   state['prev_shift'] = curr_tab,   curr_shift
-    state['prev_c'],     state['prev_z']     = curr_c,     curr_z
+        if pygame.K_z in keydowns:
+            state['throttle_step'] = max(1, state['throttle_step'] - 1)
 
     raw_throttle = max(-1.0, min(1.0, (-1.0 if keys[pygame.K_w] else 0.0) + (1.0 if keys[pygame.K_s] else 0.0)))
     raw_yaw      = max(-1.0, min(1.0, (-1.0 if keys[pygame.K_a] else 0.0) + (1.0 if keys[pygame.K_d] else 0.0)))
@@ -386,6 +384,7 @@ def draw_status(screen, font, state, mode, channels, connected):
 # ==========================================
 pygame.init()
 pygame.joystick.init()
+pygame.key.set_repeat(250, 100)   # 長按自動重複（初始 250ms，之後每 100ms）
 joystick = None
 try:
     joystick = pygame.joystick.Joystick(0)
@@ -423,10 +422,8 @@ state = {
     'offset':     (0.0, 0.0, 0.0, 0.0),
     'prev_sq':    0, 'prev_tri': 0, 'prev_circle': 0,
     'prev_up':    0, 'prev_down': 0, 'prev_left': 0, 'prev_right': 0,
-    # 鍵盤
-    'prev_tab':   False, 'prev_shift': False,
-    'prev_c':     False, 'prev_z':     False,
-    'prev_r':     False, 'prev_h':     False,
+    # 鍵盤（toggle 類仍需 prev；Tab/Shift/C/Z 改用 KEYDOWN，不需要 prev）
+    'prev_r':     False, 'prev_h': False,
 }
 
 channels = {'throttle': 0, 'target_alt': 0, 'yaw': 127, 'pitch': 127, 'roll': 127, 'ah_val': 0}
@@ -505,10 +502,12 @@ else:
 
 try:
     while True:
-        pygame.event.pump()
+        keydowns = set()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 raise KeyboardInterrupt
+            if event.type == pygame.KEYDOWN:
+                keydowns.add(event.key)
 
         if mode == 'gamepad':
             channels, should_exit, estop = read_gamepad(joystick, state)
@@ -521,7 +520,7 @@ try:
                 raise KeyboardInterrupt
         else:
             keys = pygame.key.get_pressed()
-            channels, should_exit = read_keyboard(keys, state)
+            channels, should_exit = read_keyboard(keys, keydowns, state)
 
         if should_exit:
             break
