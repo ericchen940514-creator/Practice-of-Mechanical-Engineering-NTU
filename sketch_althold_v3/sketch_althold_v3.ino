@@ -39,6 +39,7 @@ unsigned long last_pid_time = 0;
 // ─────────────────────────────────────────
 // 感測器
 // ─────────────────────────────────────────
+bool  sensor_ok     = false;
 float filtered_mm   = -1;
 bool  filter_inited = false;
 unsigned long last_sensor_time = 0;
@@ -111,10 +112,12 @@ void setup() {
   BTSerial.begin(9600);
   Wire.begin();
   gripper_servo.attach(6);
-  altSensor.init();
-  altSensor.setTimeout(50);
-  altSensor.setMeasurementTimingBudget(20000);
-  altSensor.startContinuous();
+  if (altSensor.init()) {
+    altSensor.setTimeout(50);
+    altSensor.setMeasurementTimingBudget(20000);
+    altSensor.startContinuous();
+    sensor_ok = true;
+  }
 }
 
 // ─────────────────────────────────────────
@@ -162,7 +165,7 @@ void loop() {
 
         if (ah_val == 1 && !alt_hold_active) {
           // ── 切入定高：快照當下濾波高度與油門，鎖定 base_throttle ──
-          if (filtered_mm > 30 && filtered_mm < 1300) {
+          if (sensor_ok && filtered_mm > 30 && filtered_mm < 1300) {
             target_alt_cm   = filtered_mm / 10.0f;
             base_throttle   = manual_throttle;
             integral        = 0;
@@ -186,8 +189,9 @@ void loop() {
           int exit_thr    = ibus_channels[2];  // PID 最後輸出值
           alt_hold_active = false;
           ibus_channels[2] = exit_thr;          // 油門不跳
-          BTSerial.print("T:");
-          BTSerial.println(exit_thr);           // 通知 Python 更新 base_throttle
+          char tbuf[16];
+          snprintf(tbuf, sizeof(tbuf), "T:%d\n", exit_thr);
+          BTSerial.print(tbuf);                 // 通知 Python 更新 base_throttle（一次 TX）
 
         } else {
           // ── 手動模式 ──
@@ -198,7 +202,7 @@ void loop() {
   }
 
   // ── 感測器讀取 + EMA 濾波 ──
-  if (millis() - last_sensor_time >= 20 && sensorDataReady()) {
+  if (sensor_ok && millis() - last_sensor_time >= 20 && sensorDataReady()) {
     last_sensor_time = millis();
     int mm = altSensor.readRangeContinuousMillimeters();
     if (!altSensor.timeoutOccurred() && mm > 0 && mm < 2000) {
@@ -216,10 +220,11 @@ void loop() {
     updateAltHold(filtered_mm);
   }
 
-  // ── 回傳高度給 PC（每 200ms） ──
-  if (millis() - last_alt_report >= 200 && filtered_mm > 0) {
-    BTSerial.print("D:");
-    BTSerial.println((int)filtered_mm);
+  // ── 回傳高度給 PC（每 200ms，一次 TX 避免中斷停用兩次） ──
+  if (sensor_ok && millis() - last_alt_report >= 200 && filtered_mm > 0) {
+    char dbuf[16];
+    snprintf(dbuf, sizeof(dbuf), "D:%d\n", (int)filtered_mm);
+    BTSerial.print(dbuf);
     last_alt_report = millis();
   }
 
