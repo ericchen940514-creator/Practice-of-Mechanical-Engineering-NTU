@@ -1,3 +1,6 @@
+import os
+os.environ['SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS'] = '1'  # 允許手把在背景（非焦點）時繼續運作
+
 import pygame
 import serial
 import time
