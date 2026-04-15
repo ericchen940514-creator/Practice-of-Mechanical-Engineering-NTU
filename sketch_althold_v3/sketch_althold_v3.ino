@@ -49,7 +49,7 @@ unsigned long last_alt_report  = 0;
 // 係數
 // ─────────────────────────────────────────
 const float Kp    = 2.5;
-const float Ki    = 0.05;
+const float Ki    = 0.3;
 const float Kd    = 0.8;   // 原本 6.0，過大會把感測器噪訊放大成油門跳動
 const float ALPHA = 0.15;  // 感測器 EMA（越小越平滑）
 const float BETA  = 0.2;   // D 項低通濾波（越小越平滑）
@@ -89,7 +89,7 @@ void updateAltHold(float filt_mm) {
   float error = target_alt_cm - current_cm;
 
   integral += error * dt;
-  integral = constrain(integral, -30.0f, 30.0f);
+  integral = constrain(integral, -150.0f, 150.0f);
 
   float raw_deriv = (error - last_error) / dt;
   d_filtered = BETA * raw_deriv + (1.0f - BETA) * d_filtered;
@@ -160,8 +160,10 @@ void loop() {
 
         gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
 
-        // manual_throttle 永遠跟著搖桿更新
-        manual_throttle = map(thr_val, 0, 255, 1000, 2000);
+        // manual_throttle 只在手動模式下更新，切入定高後保留最後手動值
+        if (ah_val == 0) {
+          manual_throttle = map(thr_val, 0, 255, 1000, 2000);
+        }
 
         if (ah_val == 1 && !alt_hold_active) {
           // ── 切入定高：快照當下濾波高度與油門，鎖定 base_throttle ──
@@ -220,11 +222,16 @@ void loop() {
     updateAltHold(filtered_mm);
   }
 
-  // ── 回傳高度給 PC（每 200ms，一次 TX 避免中斷停用兩次） ──
+  // ── 回傳高度（+定高時 PID 油門）給 PC（每 200ms） ──
   if (sensor_ok && millis() - last_alt_report >= 200 && filtered_mm > 0) {
     char dbuf[16];
     snprintf(dbuf, sizeof(dbuf), "D:%d\n", (int)filtered_mm);
     BTSerial.print(dbuf);
+    if (alt_hold_active) {
+      char pbuf[16];
+      snprintf(pbuf, sizeof(pbuf), "P:%d\n", ibus_channels[2]);
+      BTSerial.print(pbuf);
+    }
     last_alt_report = millis();
   }
 

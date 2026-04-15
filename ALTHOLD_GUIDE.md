@@ -1,4 +1,4 @@
-# 定高模式實驗指南（v0.4.14.1）
+# 定高模式實驗指南（v0.4.14.2）
 
 > ⚠️ **實驗性功能**：尚未經過完整飛行測試，PID 參數需依實際飛行狀況調整。請在安全環境下低空測試，並隨時準備切回手動模式或觸發緊急停機。
 
@@ -66,6 +66,8 @@
 1. 確認 `sensor_ok` 且 `filtered_mm` 在有效範圍（3～130 cm）
 2. 快照當下 **EMA 濾波後的高度**，設為 `target_alt_cm`
 3. 快照當下搖桿油門，鎖死為 `base_throttle`（定高期間不再更新）
+   - `manual_throttle` 只在 `ah_val == 0`（手動模式）時更新，確保捕捉到切入前的真實懸停油門
+   - Python 端亦在切入時將 `base_throttle` 更新為「步進 + 搖桿/按鍵」的實際總油門，保持雙端一致
 4. 重置 PID 所有狀態（`integral`、`last_error`、`d_filtered`）
 5. 開啟 `alt_hold_active`
 
@@ -131,6 +133,7 @@ S | thr | yaw | pitch | roll | target_alt | gripper | arm | ah_val | XOR_checksu
 | 格式 | 觸發時機 | 說明 |
 |------|----------|------|
 | `D:<mm>\n` | 每 200ms | 當前 EMA 濾波後高度（單位 mm） |
+| `P:<ibus>\n` | 每 200ms（定高時） | PID 當前輸出 IBUS 油門值（1000～2000），Python 換算為 0～255 顯示於 UI |
 | `T:<ibus>\n` | 退出定高時一次 | PID 最後輸出的 IBUS 油門值（1000～2000），Python 換算後設為新基準油門 |
 
 ---
@@ -195,21 +198,30 @@ python main_althold_v2.py --port COM4
 
 ```cpp
 const float Kp    = 2.5;   // 比例：越大反應越快，過大會震盪
-const float Ki    = 0.05;  // 積分：補償穩態誤差
+const float Ki    = 0.3;   // 積分：補償穩態誤差（積分上限 ±150，最大貢獻 45 IBUS）
 const float Kd    = 0.8;   // 微分：已加低通濾波，不需像舊版設很大
 const float ALPHA = 0.15;  // 感測器 EMA 濾波係數（越小越平滑，延遲越高）
 const float BETA  = 0.2;   // D 項低通濾波係數（越小越平滑）
 ```
+
+積分項上限：`integral = constrain(integral, -150.0f, 150.0f)`（舊版為 ±30，實際最大貢獻僅 1.5 IBUS，無法持續爬升）
 
 ### 與舊版（v2）的差異
 
 | 項目 | v2 | v3（現行） |
 |------|----|------------|
 | Kd | 6.0（無濾波） | 0.8（加 D 項低通） |
+| Ki / 積分上限 | 0.05 / ±30（最大 1.5 IBUS，無法持續爬升） | 0.3 / ±150（最大 45 IBUS） |
 | 感測器輸入 | 原始 mm 值 | EMA 濾波後的浮點值 |
 | base_throttle | 定高中持續跟著搖桿更新 | 切入時鎖死，定高中不再更新 |
+| base_throttle 捕捉值 | Python 固定步進值（不含搖桿） | 切入瞬間步進 + 搖桿的實際總油門 |
+| manual_throttle 更新時機 | 每包封包都更新 | 僅 ah_val==0（手動模式）時更新 |
 | 退出定高 | 直接用搖桿位置，可能跳油門 | 回傳 PID 最後輸出，Python 無縫接手 |
 | sensor_ok 保護 | 僅檢查 init() | init() + startContinuous() 全鏈路保護 |
+| PID 油門回傳 | 無 | `P:<ibus>` 每 200ms 回傳，Python UI 即時顯示 |
+| 靈敏度（俯仰/翻滾） | TILT_SENS = 0.6 | TILT_SENS = 0.3 |
+| 靈敏度（偏航） | YAW_SENS = 0.5 | YAW_SENS = 0.25 |
+| 目標高度四捨五入 | `int()`（截斷） | `round()`（四捨五入） |
 
 ### 調參建議順序
 

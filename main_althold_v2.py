@@ -23,8 +23,8 @@ COM_PORT  = args.port
 BAUD_RATE = 9600
 
 JOYSTICK_SENSITIVITY = 60
-TILT_SENS  = 0.6
-YAW_SENS   = 0.5
+TILT_SENS  = 0.3
+YAW_SENS   = 0.25
 STEP_SPEED = 5
 DEAD_ZONE  = 0.05
 
@@ -187,9 +187,14 @@ def read_gamepad(joystick, state):
     if curr_circle and not state['prev_circle']:
         state['alt_hold_active'] = not state['alt_hold_active']
         if state['alt_hold_active']:
+            # 快照當下實際總油門（步進 + 搖桿）作為定高基準
+            oy = state['offset'][0]
+            raw_t = apply_dead_zone(joystick.get_axis(1) - oy)
+            state['base_throttle'] = max(0, min(255,
+                state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
             if snap >= 0:
-                state['target_alt'] = int(max(5, min(ALT_MAX_CM, snap)))
+                state['target_alt'] = round(max(5, min(ALT_MAX_CM, snap)))
                 print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
                 print(" D-pad 上/下 調整目標高度 | D-pad 左/右 調整步進量")
             else:
@@ -305,9 +310,15 @@ def read_keyboard(state):
     if curr_h and not state['prev_h']:
         state['alt_hold_active'] = not state['alt_hold_active']
         if state['alt_hold_active']:
+            # 快照當下實際總油門（步進 + W/S 按鍵）作為定高基準
+            raw_t = max(-1.0, min(1.0,
+                (-1.0 if kb.is_pressed('w') else 0.0) +
+                ( 1.0 if kb.is_pressed('s') else 0.0)))
+            state['base_throttle'] = max(0, min(255,
+                state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
             if snap >= 0:
-                state['target_alt'] = int(max(5, min(ALT_MAX_CM, snap)))
+                state['target_alt'] = round(max(5, min(ALT_MAX_CM, snap)))
                 print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
                 print(" Tab=高度↑ Shift=高度↓")
             else:
@@ -383,7 +394,12 @@ def draw_status(screen, font, state, mode, channels, connected):
     alt_str = f"{cur_alt:.1f} cm" if cur_alt >= 0 else "---"
 
     if state['alt_hold_active']:
-        throttle_str = f"目標高度: {state['target_alt']:3d} cm (步進:{state['alt_step']:2d}cm)"
+        if _pid_throttle >= 0:
+            pid_conv = int((_pid_throttle - 1000) / 1000.0 * 255)
+            pid_str = f" PID油門: {pid_conv}"
+        else:
+            pid_str = ""
+        throttle_str = f"目標高度: {state['target_alt']:3d} cm (步進:{state['alt_step']:2d}cm){pid_str}"
     else:
         throttle_str = f"油門: {channels['throttle']:3d} 基準: {state['base_throttle']:3d}(步進:{state['throttle_step']:2d})"
 
@@ -464,6 +480,7 @@ _alt_lock    = threading.Lock()
 _state_lock  = threading.Lock()   # 保護背景執行緒修改 state
 _current_alt = -1
 _alt_history = deque(maxlen=10)
+_pid_throttle = -1  # Arduino 定高 PID 實際油門（IBUS 1000~2000），-1 表示尚無資料
 
 def get_alt_snapshot():
     with _alt_lock:
@@ -472,7 +489,7 @@ def get_alt_snapshot():
         return round(sum(_alt_history) / len(_alt_history), 1)
 
 def _serial_reader():
-    global _current_alt
+    global _current_alt, _pid_throttle
     while True:
         with _serial_lock:
             ser = bt_serial
@@ -489,6 +506,10 @@ def _serial_reader():
                 with _alt_lock:
                     _current_alt = val
                     _alt_history.append(val)
+
+            elif line.startswith('P:'):
+                # 定高中 PID 實際輸出油門（IBUS 1000~2000）
+                _pid_throttle = int(line[2:])
 
             elif line.startswith('T:'):
                 # ── 定高結束，Arduino 回傳最後 PID 油門（IBUS 值 1000~2000） ──
@@ -593,7 +614,15 @@ try:
         if not state['is_exiting'] and now - last_print_time >= 0.2:
             conn_str = "連線中" if connected else "斷線中"
             arm_str  = "解鎖"   if state['arm_state'] == 255 else "上鎖"
-            ah_str   = f"定高:{state['target_alt']}cm" if state['alt_hold_active'] else f"手動:{channels['throttle']:3d}"
+            if state['alt_hold_active']:
+                if _pid_throttle >= 0:
+                    pid_conv = int((_pid_throttle - 1000) / 1000.0 * 255)
+                    pid_disp = f" PID:{pid_conv:3d}"
+                else:
+                    pid_disp = ""
+                ah_str = f"定高:{state['target_alt']}cm{pid_disp}"
+            else:
+                ah_str = f"手動:{channels['throttle']:3d}"
             with _alt_lock:
                 cur = _current_alt
             cur_str = f"{cur:.1f}cm" if cur >= 0 else " ---"
