@@ -5,6 +5,7 @@ import sys
 import argparse
 import threading
 from collections import deque
+import keyboard as kb
 
 __version__ = "0.4.14.1"
 
@@ -79,6 +80,27 @@ def safe_disconnect(ser, gripper_val=127):
 
 def apply_dead_zone(value):
     return 0.0 if abs(value) < DEAD_ZONE else value
+
+# ── 全域鍵盤長按重複計時（不需要 pygame 視窗焦點）──
+_key_held_start  = {}
+_key_last_repeat = {}
+
+def kb_triggered(key, initial=0.25, repeat=0.10):
+    """回傳 True 表示此按鍵現在應觸發一次動作（初始按下 + 長按自動重複）"""
+    if not kb.is_pressed(key):
+        _key_held_start.pop(key, None)
+        _key_last_repeat.pop(key, None)
+        return False
+    now = time.time()
+    if key not in _key_held_start:
+        _key_held_start[key] = now
+        _key_last_repeat[key] = now
+        return True
+    if now - _key_held_start[key] >= initial:
+        if now - _key_last_repeat[key] >= repeat:
+            _key_last_repeat[key] = now
+            return True
+    return False
 
 # ==========================================
 # 連線等待
@@ -259,14 +281,11 @@ def read_gamepad(joystick, state):
     }
     return channels, should_exit, False
 
-def read_keyboard(keys, keydowns, state):
-    """
-    keys     : pygame.key.get_pressed()，用於連續控制與長按偵測
-    keydowns : 本幀的 KEYDOWN 事件集合，用於一次性觸發（含 key repeat）
-    """
-    # X 長按 3 秒退出（時間偵測，需要 get_pressed）
+def read_keyboard(state):
+    """鍵盤輸入讀取（使用全域 keyboard 函式庫，不需要 pygame 視窗焦點）"""
+    # X 長按 3 秒退出
     should_exit = False
-    if keys[pygame.K_x]:
+    if kb.is_pressed('x'):
         if not state['is_exiting']:
             state['is_exiting']      = True
             state['exit_press_time'] = time.time()
@@ -278,8 +297,8 @@ def read_keyboard(keys, keydowns, state):
             state['is_exiting'] = False
             print("\n✅ 已放開 X 鍵，退出指令取消。")
 
-    # H：切換定高（toggle，用 get_pressed + prev_h 避免重複觸發）
-    curr_h = keys[pygame.K_h]
+    # H：切換定高（edge trigger）
+    curr_h = kb.is_pressed('h')
     if curr_h and not state['prev_h']:
         state['alt_hold_active'] = not state['alt_hold_active']
         if state['alt_hold_active']:
@@ -295,28 +314,28 @@ def read_keyboard(keys, keydowns, state):
             print("\n🔓 定高關閉，回手動模式（等待 Arduino 同步基準油門）")
     state['prev_h'] = curr_h
 
-    # Tab / Shift / C / Z：用 KEYDOWN 事件（每次觸發一步，支援長按自動重複）
+    # Tab / Shift / C / Z：初始按下 + 長按自動重複
     if state['alt_hold_active']:
-        if pygame.K_TAB in keydowns:
+        if kb_triggered('tab'):
             state['target_alt'] = min(ALT_MAX_CM, state['target_alt'] + state['alt_step'])
             print(f"\n📡 目標高度 → {state['target_alt']} cm")
-        if pygame.K_LSHIFT in keydowns or pygame.K_RSHIFT in keydowns:
+        if kb_triggered('shift'):
             state['target_alt'] = max(5, state['target_alt'] - state['alt_step'])
             print(f"\n📡 目標高度 → {state['target_alt']} cm")
     else:
-        if pygame.K_TAB in keydowns:
+        if kb_triggered('tab'):
             state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
-        if pygame.K_LSHIFT in keydowns or pygame.K_RSHIFT in keydowns:
+        if kb_triggered('shift'):
             state['base_throttle'] = max(0, state['base_throttle'] - state['throttle_step'])
-        if pygame.K_c in keydowns:
+        if kb_triggered('c'):
             state['throttle_step'] = min(20, state['throttle_step'] + 1)
-        if pygame.K_z in keydowns:
+        if kb_triggered('z'):
             state['throttle_step'] = max(1, state['throttle_step'] - 1)
 
-    raw_throttle = max(-1.0, min(1.0, (-1.0 if keys[pygame.K_w] else 0.0) + (1.0 if keys[pygame.K_s] else 0.0)))
-    raw_yaw      = max(-1.0, min(1.0, (-1.0 if keys[pygame.K_a] else 0.0) + (1.0 if keys[pygame.K_d] else 0.0)))
-    raw_pitch    = max(-1.0, min(1.0, (-1.0 if keys[pygame.K_UP]   else 0.0) + (1.0 if keys[pygame.K_DOWN]  else 0.0)))
-    raw_roll     = max(-1.0, min(1.0, (-1.0 if keys[pygame.K_LEFT] else 0.0) + (1.0 if keys[pygame.K_RIGHT] else 0.0)))
+    raw_throttle = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0)))
+    raw_yaw      = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('a') else 0.0) + (1.0 if kb.is_pressed('d') else 0.0)))
+    raw_pitch    = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('up')    else 0.0) + (1.0 if kb.is_pressed('down')  else 0.0)))
+    raw_roll     = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left')  else 0.0) + (1.0 if kb.is_pressed('right') else 0.0)))
 
     if state['alt_hold_active']:
         final_throttle = state['base_throttle']
@@ -324,7 +343,7 @@ def read_keyboard(keys, keydowns, state):
         final_throttle = max(0, min(255,
             state['base_throttle'] + int(-raw_throttle * JOYSTICK_SENSITIVITY)))
 
-    curr_r = keys[pygame.K_r]
+    curr_r = kb.is_pressed('r')
     if curr_r and not state['prev_r']:
         if state['arm_state'] == 0 and final_throttle <= 5:
             state['arm_state'] = 255
@@ -332,8 +351,8 @@ def read_keyboard(keys, keydowns, state):
             state['arm_state'] = 0
     state['prev_r'] = curr_r
 
-    if keys[pygame.K_q]: state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
-    if keys[pygame.K_e]: state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
+    if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
+    if kb.is_pressed('e'): state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
 
     target_alt_byte = int(state['target_alt']) if state['alt_hold_active'] else 0
     ah_val          = 1 if state['alt_hold_active'] else 0
@@ -499,19 +518,16 @@ if mode == 'gamepad':
     print("定高開啟時：D-pad上下=目標高度±大步 D-pad左右=目標高度±3cm")
     print("手動模式時：D-pad上下=基準油門± Options長按3秒=退出 4+6=緊急停機\n")
 else:
-    print("\n⌨️ 鍵盤模式已上線！（定高版）")
+    print("\n⌨️ 鍵盤模式已上線！（定高版，全域輸入，不需點選視窗）")
     print("W/S=油門 A/D=偏航 ↑↓=俯仰 ←→=翻滾 R=解鎖/上鎖 H=定高切換")
     print("定高開啟時：Tab=高度↑ Shift=高度↓")
     print("手動模式時：Tab=油門↑ Shift=油門↓ C/Z=步進± X長按3秒=退出\n")
 
 try:
     while True:
-        keydowns = set()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 raise KeyboardInterrupt
-            if event.type == pygame.KEYDOWN:
-                keydowns.add(event.key)
 
         if mode == 'gamepad':
             try:
@@ -529,8 +545,7 @@ try:
                         send_packet(bt_serial, estop_pkt)
                 raise KeyboardInterrupt
         else:
-            keys = pygame.key.get_pressed()
-            channels, should_exit = read_keyboard(keys, keydowns, state)
+            channels, should_exit = read_keyboard(state)
 
         if should_exit:
             break
