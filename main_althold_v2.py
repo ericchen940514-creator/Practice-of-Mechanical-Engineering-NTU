@@ -17,7 +17,7 @@ except ImportError:
         stop   = staticmethod(lambda *_: None)
         record = staticmethod(lambda *_: None)
 
-__version__ = "0.4.14.1"
+__version__ = "0.4.16.0"
 
 # ==========================================
 # 啟動參數
