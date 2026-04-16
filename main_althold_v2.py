@@ -9,6 +9,13 @@ import argparse
 import threading
 from collections import deque
 import keyboard as kb
+try:
+    import pid_logger
+except ImportError:
+    class pid_logger:
+        start  = staticmethod(lambda *_: None)
+        stop   = staticmethod(lambda *_: None)
+        record = staticmethod(lambda *_: None)
 
 __version__ = "0.4.14.1"
 
@@ -197,10 +204,12 @@ def read_gamepad(joystick, state):
                 state['target_alt'] = round(max(5, min(ALT_MAX_CM, snap)))
                 print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
                 print(" D-pad 上/下 調整目標高度 | D-pad 左/右 調整步進量")
+                pid_logger.start(state['target_alt'])
             else:
                 state['alt_hold_active'] = False
                 print("\n⚠️ 感測器尚無資料，無法切入定高。")
         else:
+            pid_logger.stop()
             print("\n🔓 定高關閉，回手動模式（等待 Arduino 同步基準油門）")
     state['prev_circle'] = curr_circle
 
@@ -321,10 +330,12 @@ def read_keyboard(state):
                 state['target_alt'] = round(max(5, min(ALT_MAX_CM, snap)))
                 print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
                 print(" Tab=高度↑ Shift=高度↓")
+                pid_logger.start(state['target_alt'])
             else:
                 state['alt_hold_active'] = False
                 print("\n⚠️ 感測器尚無資料，無法切入定高。")
         else:
+            pid_logger.stop()
             print("\n🔓 定高關閉，回手動模式（等待 Arduino 同步基準油門）")
     state['prev_h'] = curr_h
 
@@ -482,6 +493,7 @@ _current_alt = -1
 _alt_history = deque(maxlen=10)
 _pid_throttle = -1  # Arduino 定高 PID 實際油門（IBUS 1000~2000），-1 表示尚無資料
 
+
 def get_alt_snapshot():
     with _alt_lock:
         if not _alt_history:
@@ -506,6 +518,7 @@ def _serial_reader():
                 with _alt_lock:
                     _current_alt = val
                     _alt_history.append(val)
+                pid_logger.record(val, state['target_alt'], _pid_throttle)
 
             elif line.startswith('P:'):
                 # 定高中 PID 實際輸出油門（IBUS 1000~2000）
@@ -644,6 +657,7 @@ except pygame.error as e:
     print(f"\n💥 pygame 錯誤導致程式終止：{e}")
 
 finally:
+    pid_logger.stop()
     print("\n🔌 正在關閉連線...")
     if bt_serial is not None and bt_serial.is_open:
         safe_disconnect(bt_serial)
