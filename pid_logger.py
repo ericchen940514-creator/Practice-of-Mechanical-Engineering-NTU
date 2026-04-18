@@ -3,6 +3,7 @@ pid_logger.py — 定高 PID 數據記錄模組（測試用）
 每次定高開啟時自動建立 CSV，關閉時儲存。
 """
 import os
+import re
 import csv
 import time
 import threading
@@ -13,17 +14,38 @@ _writer    = None
 _start_t   = 0.0
 
 
+def _read_pid_from_ino() -> str:
+    """從 Arduino sketch 讀取 Kp/Ki/Kd，回傳格式化字串。"""
+    ino_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'sketch_althold_v3', 'sketch_althold_v3.ino')
+    params = {}
+    try:
+        with open(ino_path, encoding='utf-8') as f:
+            for line in f:
+                for p in ('Kp', 'Ki', 'Kd'):
+                    m = re.search(rf'const float {p}\s*=\s*([\d.]+)', line)
+                    if m:
+                        params[p] = m.group(1)
+    except Exception:
+        pass
+    if params:
+        return f"Kp={params.get('Kp','?')} Ki={params.get('Ki','?')} Kd={params.get('Kd','?')}"
+    return "Kp=? Ki=? Kd=?"
+
+
 def start(target_alt_cm: float) -> None:
     """定高啟動時呼叫，建立新的 CSV 檔案。"""
     global _file, _writer, _start_t
     os.makedirs('pid_logs', exist_ok=True)
     fname = os.path.join('pid_logs', f"althold_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    pid_str = _read_pid_from_ino()
     with _lock:
-        _file    = open(fname, 'w', newline='', encoding='utf-8')
+        _file = open(fname, 'w', newline='', encoding='utf-8')
+        _file.write(f'# {pid_str}\n')
         _writer  = csv.writer(_file)
         _writer.writerow(['time_s', 'current_alt_cm', 'target_alt_cm', 'pid_thr_ibus', 'pid_thr_0_255'])
         _start_t = time.time()
-    print(f"\n📝 開始記錄 PID 數據：{fname}（目標高度 {target_alt_cm} cm）")
+    print(f"\n📝 開始記錄 PID 數據：{fname}（目標高度 {target_alt_cm} cm，{pid_str}）")
 
 
 def stop() -> None:

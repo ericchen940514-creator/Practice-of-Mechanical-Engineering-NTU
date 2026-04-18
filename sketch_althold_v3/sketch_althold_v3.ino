@@ -1,4 +1,4 @@
-// Version: 0.4.14.1
+// Version: 0.4.15.0
 #include <Servo.h>
 #include <SoftwareSerial.h>
 #include <Wire.h>
@@ -28,13 +28,15 @@ unsigned long last_ibus_time = 0;
 // 定高 PID
 // ─────────────────────────────────────────
 bool  alt_hold_active = false;
+bool  takeoff_phase   = false;   // 起飛爬升中（尚未離地）
 float target_alt_cm   = 0;
 float last_error      = 0;
 float integral        = 0;
-float d_filtered      = 0;      // D 項低通濾波器狀態
-int   base_throttle   = 1500;   // PID 用，切入定高時鎖定，不再更新
-int   manual_throttle = 1500;   // 永遠跟著搖桿，關閉定高時的 fallback
-unsigned long last_pid_time = 0;
+float d_filtered      = 0;
+int   base_throttle   = 1500;
+int   manual_throttle = 1500;
+unsigned long last_pid_time    = 0;
+unsigned long takeoff_start_ms = 0;
 
 // ─────────────────────────────────────────
 // 感測器
@@ -49,10 +51,15 @@ unsigned long last_alt_report  = 0;
 // 係數
 // ─────────────────────────────────────────
 const float Kp    = 2.5;
-const float Ki    = 0.3;
-const float Kd    = 0.8;   // 原本 6.0，過大會把感測器噪訊放大成油門跳動
-const float ALPHA = 0.15;  // 感測器 EMA（越小越平滑）
-const float BETA  = 0.2;   // D 項低通濾波（越小越平滑）
+const float Ki    = 0.5;
+const float Kd    = 3.5;
+const float ALPHA = 0.15;
+const float BETA  = 0.2;
+const int   TAKEOFF_LIFTOFF_CM  = 15;    // 超過此高度視為已離地
+const int   TAKEOFF_MAX_IBUS    = 1780;  // 起飛爬升油門安全上限
+const unsigned long TAKEOFF_TIMEOUT_MS = 8000;  // 8 秒內未離地則中止
+const float MAX_ALT_CM          = 60.0f; // 超過此高度強制解除定高
+const float MAX_CORRECTION      = 150.0f; // PID 單次修正量上限（IBUS）
 
 // ─────────────────────────────────────────
 // IBUS 發送
@@ -84,19 +91,63 @@ void updateAltHold(float filt_mm) {
 
   if (filt_mm < 0) return;
   float current_cm = filt_mm / 10.0f;
-  if (current_cm < 3 || current_cm > 130) return;
+  if (current_cm > 130) return;
+
+  // 高度上限保護：超過 MAX_ALT_CM 強制解除定高
+  if (current_cm > MAX_ALT_CM) {
+    alt_hold_active  = false;
+    takeoff_phase    = false;
+    ibus_channels[2] = manual_throttle;
+    char tbuf[16];
+    snprintf(tbuf, sizeof(tbuf), "T:%d\n", manual_throttle);
+    BTSerial.print(tbuf);
+    return;
+  }
 
   float error = target_alt_cm - current_cm;
 
   integral += error * dt;
-  integral = constrain(integral, -150.0f, 150.0f);
+  integral = constrain(integral, -300.0f, 300.0f);
 
   float raw_deriv = (error - last_error) / dt;
   d_filtered = BETA * raw_deriv + (1.0f - BETA) * d_filtered;
   last_error = error;
 
   float correction = Kp * error + Ki * integral + Kd * d_filtered;
+  correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
   ibus_channels[2] = constrain(base_throttle + (int)correction, 1100, 1900);
+}
+
+// ─────────────────────────────────────────
+// 起飛爬升（地面切入定高用）
+// ─────────────────────────────────────────
+void updateTakeoff() {
+  unsigned long now = millis();
+  if (now - last_pid_time < 20) return;
+  last_pid_time = now;
+
+  // 逾時保護：8 秒內未離地則自動解除定高
+  if (now - takeoff_start_ms > TAKEOFF_TIMEOUT_MS) {
+    alt_hold_active  = false;
+    takeoff_phase    = false;
+    ibus_channels[2] = manual_throttle;
+    return;
+  }
+
+  float cur_alt = (filtered_mm > 0) ? filtered_mm / 10.0f : 0;
+
+  if (cur_alt >= TAKEOFF_LIFTOFF_CM) {
+    // 已離地：快照當下油門為懸停基準，切換為 PID
+    base_throttle = (int)ibus_channels[2];
+    takeoff_phase = false;
+    integral      = 0;
+    last_error    = target_alt_cm - cur_alt;
+    d_filtered    = 0;
+    return;
+  }
+
+  // 緩坡加油門（每 20ms +3 IBUS = 150 IBUS/秒）
+  ibus_channels[2] = constrain((int)ibus_channels[2] + 3, 1000, TAKEOFF_MAX_IBUS);
 }
 
 // ─────────────────────────────────────────
@@ -166,31 +217,40 @@ void loop() {
         }
 
         if (ah_val == 1 && !alt_hold_active) {
-          // ── 切入定高：快照當下濾波高度與油門，鎖定 base_throttle ──
-          if (sensor_ok && filtered_mm > 30 && filtered_mm < 1300) {
-            target_alt_cm   = filtered_mm / 10.0f;
-            base_throttle   = manual_throttle;
+          if (sensor_ok && filtered_mm < 1300) {
+            target_alt_cm   = constrain((float)alt_val, 10.0f, 120.0f);
             integral        = 0;
             last_error      = 0;
             d_filtered      = 0;
             last_pid_time   = millis();
             alt_hold_active = true;
+
+            float cur_alt = (filtered_mm > 0) ? filtered_mm / 10.0f : 0;
+            if (cur_alt < TAKEOFF_LIFTOFF_CM) {
+              // ── 地面起飛：緩坡爬升直到離地，再切 PID ──
+              takeoff_phase    = true;
+              takeoff_start_ms = millis();
+              ibus_channels[2] = max(manual_throttle, 1200);
+            } else {
+              // ── 已在空中：直接 PID ──
+              takeoff_phase = false;
+              base_throttle = manual_throttle;
+            }
           }
-          // 感測器無效時不切入（安全保護）
 
         } else if (ah_val == 1 && alt_hold_active) {
           // ── 定高中：base_throttle 鎖定，只更新目標高度 ──
           float new_target = constrain((float)alt_val, 3.0f, 120.0f);
           if (abs(new_target - target_alt_cm) > 0.5f) {
             target_alt_cm = new_target;
-            integral = 0;  // 目標改變時重置積分，避免 wind-up
           }
 
         } else if (ah_val == 0 && alt_hold_active) {
           // ── 關閉定高：保持 PID 最後輸出，回傳給 Python 當新基準油門 ──
-          int exit_thr    = ibus_channels[2];  // PID 最後輸出值
-          alt_hold_active = false;
-          ibus_channels[2] = exit_thr;          // 油門不跳
+          int exit_thr    = ibus_channels[2];
+          alt_hold_active  = false;
+          takeoff_phase    = false;
+          ibus_channels[2] = exit_thr;
           char tbuf[16];
           snprintf(tbuf, sizeof(tbuf), "T:%d\n", exit_thr);
           BTSerial.print(tbuf);                 // 通知 Python 更新 base_throttle（一次 TX）
@@ -217,9 +277,10 @@ void loop() {
     }
   }
 
-  // ── 定高 PID ──
+  // ── 定高 PID / 起飛爬升 ──
   if (alt_hold_active) {
-    updateAltHold(filtered_mm);
+    if (takeoff_phase) updateTakeoff();
+    else               updateAltHold(filtered_mm);
   }
 
   // ── 回傳高度（+定高時 PID 油門）給 PC（每 200ms） ──

@@ -201,7 +201,8 @@ def read_gamepad(joystick, state):
                 state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
             if snap >= 0:
-                state['target_alt'] = round(max(5, min(ALT_MAX_CM, snap)))
+                if snap >= 15:
+                    state['target_alt'] = round(min(ALT_MAX_CM, snap))
                 print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
                 print(" D-pad 上/下 調整目標高度 | D-pad 左/右 調整步進量")
                 pid_logger.start(state['target_alt'])
@@ -327,7 +328,8 @@ def read_keyboard(state):
                 state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
             if snap >= 0:
-                state['target_alt'] = round(max(5, min(ALT_MAX_CM, snap)))
+                if snap >= 15:
+                    state['target_alt'] = round(min(ALT_MAX_CM, snap))
                 print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
                 print(" Tab=高度↑ Shift=高度↓")
                 pid_logger.start(state['target_alt'])
@@ -469,7 +471,7 @@ state = {
     'exit_press_time': 0,
     # 定高
     'alt_hold_active': False,
-    'target_alt':      50,
+    'target_alt':      25,
     'alt_step':        ALT_STEP_DEFAULT,
     # 手把
     'offset':     (0.0, 0.0, 0.0, 0.0),
