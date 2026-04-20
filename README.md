@@ -211,8 +211,8 @@ PID 係數在 `sketch_althold_v3.ino`：
 
 ```cpp
 const float Kp    = 2.5;
-const float Ki    = 0.3;
-const float Kd    = 0.8;
+const float Ki    = 0.5;
+const float Kd    = 3.5;
 const float ALPHA = 0.15;  // 感測器 EMA 濾波
 const float BETA  = 0.2;   // D 項低通濾波
 ```

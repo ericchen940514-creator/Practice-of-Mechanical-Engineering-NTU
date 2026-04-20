@@ -41,9 +41,10 @@ unsigned long takeoff_start_ms = 0;
 // ─────────────────────────────────────────
 // 感測器
 // ─────────────────────────────────────────
-bool  sensor_ok     = false;
-float filtered_mm   = -1;
-bool  filter_inited = false;
+bool  sensor_ok        = false;
+float filtered_mm      = -1;
+float prev_filtered_mm = -1;
+bool  filter_inited    = false;
 unsigned long last_sensor_time = 0;
 unsigned long last_alt_report  = 0;
 
@@ -142,12 +143,17 @@ void updateTakeoff() {
     takeoff_phase = false;
     integral      = 0;
     last_error    = target_alt_cm - cur_alt;
-    d_filtered    = 0;
+    // 用前後兩筆估算上升速度，初始化 D 項，避免第一拍誤以為靜止而繼續加油
+    if (prev_filtered_mm > 0 && filtered_mm > 0) {
+      d_filtered = (filtered_mm - prev_filtered_mm) / 0.02f / 10.0f;
+    } else {
+      d_filtered = 0;
+    }
     return;
   }
 
-  // 緩坡加油門（每 20ms +3 IBUS = 150 IBUS/秒）
-  ibus_channels[2] = constrain((int)ibus_channels[2] + 3, 1000, TAKEOFF_MAX_IBUS);
+  // 緩坡加油門（每 20ms +2 IBUS = 100 IBUS/秒）
+  ibus_channels[2] = constrain((int)ibus_channels[2] + 2, 1000, TAKEOFF_MAX_IBUS);
 }
 
 // ─────────────────────────────────────────
@@ -218,7 +224,7 @@ void loop() {
 
         if (ah_val == 1 && !alt_hold_active) {
           if (sensor_ok && filtered_mm < 1300) {
-            target_alt_cm   = constrain((float)alt_val, 10.0f, 120.0f);
+            target_alt_cm   = constrain((float)alt_val, 10.0f, MAX_ALT_CM);
             integral        = 0;
             last_error      = 0;
             d_filtered      = 0;
@@ -272,6 +278,7 @@ void loop() {
         filtered_mm   = (float)mm;
         filter_inited = true;
       } else {
+        prev_filtered_mm = filtered_mm;
         filtered_mm = ALPHA * mm + (1.0f - ALPHA) * filtered_mm;
       }
     }
