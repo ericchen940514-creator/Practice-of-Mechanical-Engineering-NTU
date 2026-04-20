@@ -17,12 +17,12 @@ except ImportError:
         stop   = staticmethod(lambda *_: None)
         record = staticmethod(lambda *_: None)
 
-__version__ = "0.4.16.0"
+__version__ = "0.4.20"
 
 # ==========================================
 # 啟動參數
 # ==========================================
-parser = argparse.ArgumentParser(description='無人機地面控制站（定高版）')
+parser = argparse.ArgumentParser(description='無人機地面控制站（定高 Expo 版）')
 parser.add_argument('--port', default='COM4', help='藍牙 COM 埠（預設: COM4）')
 args = parser.parse_args()
 
@@ -35,8 +35,13 @@ YAW_SENS   = 0.25
 STEP_SPEED = 5
 DEAD_ZONE  = 0.05
 
+# ★ 新增 Expo (指數曲線) 參數
+THROTTLE_EXPO = 0.75  # 油門曲線，數字越大中心越不靈敏 (0.0~1.0)
+TILT_EXPO     = 0.50
+YAW_EXPO      = 0.50
+
 ALT_STEP_DEFAULT = 10
-ALT_MAX_CM       = 120
+ALT_MAX_CM       = 100
 
 # ── 手把按鍵編號 ──
 BTN_CIRCLE = 1
@@ -90,6 +95,10 @@ def safe_disconnect(ser, gripper_val=127):
 
 def apply_dead_zone(value):
     return 0.0 if abs(value) < DEAD_ZONE else value
+
+def apply_expo(val, expo_factor):
+    """★ 套用指數曲線，壓平搖桿中心區域靈敏度"""
+    return (1.0 - expo_factor) * val + expo_factor * (val ** 3)
 
 # ── 全域鍵盤長按重複計時（不需要 pygame 視窗焦點）──
 _key_held_start  = {}
@@ -197,6 +206,7 @@ def read_gamepad(joystick, state):
             # 快照當下實際總油門（步進 + 搖桿）作為定高基準
             oy = state['offset'][0]
             raw_t = apply_dead_zone(joystick.get_axis(1) - oy)
+            raw_t = apply_expo(raw_t, THROTTLE_EXPO) # ★ 確保快照時也經過 Expo 處理
             state['base_throttle'] = max(0, min(255,
                 state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
@@ -265,6 +275,12 @@ def read_gamepad(joystick, state):
     raw_pitch    = apply_dead_zone(joystick.get_axis(3) - op)
     raw_roll     = apply_dead_zone(joystick.get_axis(2) - or_)
 
+    # ★ 套用 Expo 指數曲線
+    raw_throttle = apply_expo(raw_throttle, THROTTLE_EXPO)
+    raw_yaw      = apply_expo(raw_yaw, YAW_EXPO)
+    raw_pitch    = apply_expo(raw_pitch, TILT_EXPO)
+    raw_roll     = apply_expo(raw_roll, TILT_EXPO)
+
     # ── 定高模式：送固定 base_throttle，不加搖桿偏移 ──
     # ── 手動模式：base_throttle + 搖桿暫時調整 ──
     if state['alt_hold_active']:
@@ -324,6 +340,7 @@ def read_keyboard(state):
             raw_t = max(-1.0, min(1.0,
                 (-1.0 if kb.is_pressed('w') else 0.0) +
                 ( 1.0 if kb.is_pressed('s') else 0.0)))
+            raw_t = apply_expo(raw_t, THROTTLE_EXPO) # ★
             state['base_throttle'] = max(0, min(255,
                 state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
@@ -359,10 +376,16 @@ def read_keyboard(state):
         if kb_triggered('z'):
             state['throttle_step'] = max(1, state['throttle_step'] - 1)
 
-    raw_throttle = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0)))
-    raw_yaw      = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('a') else 0.0) + (1.0 if kb.is_pressed('d') else 0.0)))
-    raw_pitch    = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('up')    else 0.0) + (1.0 if kb.is_pressed('down')  else 0.0)))
-    raw_roll     = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left')  else 0.0) + (1.0 if kb.is_pressed('right') else 0.0)))
+    raw_throttle_in = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0)))
+    raw_yaw_in      = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('a') else 0.0) + (1.0 if kb.is_pressed('d') else 0.0)))
+    raw_pitch_in    = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('up')    else 0.0) + (1.0 if kb.is_pressed('down')  else 0.0)))
+    raw_roll_in     = max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left')  else 0.0) + (1.0 if kb.is_pressed('right') else 0.0)))
+
+    # ★ 套用 Expo 指數曲線
+    raw_throttle = apply_expo(raw_throttle_in, THROTTLE_EXPO)
+    raw_yaw      = apply_expo(raw_yaw_in, YAW_EXPO)
+    raw_pitch    = apply_expo(raw_pitch_in, TILT_EXPO)
+    raw_roll     = apply_expo(raw_roll_in, TILT_EXPO)
 
     if state['alt_hold_active']:
         final_throttle = state['base_throttle']
@@ -452,7 +475,7 @@ except Exception:
 
 screen = pygame.display.set_mode((600, 158))
 pygame.display.set_caption(
-    f"無人機控制站（定高版）[{COM_PORT}] — {'手把' if mode == 'gamepad' else '鍵盤'}模式")
+    f"無人機控制站（定高 Expo 版）[{COM_PORT}] — {'手把' if mode == 'gamepad' else '鍵盤'}模式")
 font  = pygame.font.SysFont("Microsoft JhengHei", 18)
 clock = pygame.time.Clock()
 
@@ -477,7 +500,7 @@ state = {
     'offset':     (0.0, 0.0, 0.0, 0.0),
     'prev_sq':    0, 'prev_tri': 0, 'prev_circle': 0,
     'prev_up':    0, 'prev_down': 0, 'prev_left': 0, 'prev_right': 0,
-    # 鍵盤（toggle 類仍需 prev；Tab/Shift/C/Z 改用 KEYDOWN，不需要 prev）
+    # 鍵盤
     'prev_r':     False, 'prev_h': False,
 }
 
@@ -546,18 +569,20 @@ def _do_reconnect():
     new_ser = connect_serial()
     with _serial_lock:
         bt_serial = new_ser
+    state['arm_state']       = 0
+    state['alt_hold_active'] = False
     _reconnecting      = False
     reconnect_cooldown = time.time() + 3.0
 
 threading.Thread(target=_serial_reader, daemon=True).start()
 
 if mode == 'gamepad':
-    print("\n🎮 手把模式已上線！（定高版）")
+    print("\n🎮 手把模式已上線！（定高 Expo 版）")
     print("△=解鎖/上鎖 ○=定高切換 □=搖桿校準")
     print("定高開啟時：D-pad上下=目標高度±大步 D-pad左右=目標高度±3cm")
     print("手動模式時：D-pad上下=基準油門± Options長按3秒=退出 4+6=緊急停機\n")
 else:
-    print("\n⌨️ 鍵盤模式已上線！（定高版，全域輸入，不需點選視窗）")
+    print("\n⌨️ 鍵盤模式已上線！（定高 Expo 版，全域輸入，不需點選視窗）")
     print("W/S=油門 A/D=偏航 ↑↓=俯仰 ←→=翻滾 R=解鎖/上鎖 H=定高切換")
     print("定高開啟時：Tab=高度↑ Shift=高度↓")
     print("手動模式時：Tab=油門↑ Shift=油門↓ C/Z=步進± X長按3秒=退出\n")

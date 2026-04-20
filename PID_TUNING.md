@@ -63,7 +63,7 @@ const float MAX_CORRECTION  = 150.0f;  // PID 單次修正量上限（IBUS）
 
 1. 解鎖無人機
 2. 按 ○ 切入定高（預設目標 25cm）
-3. Arduino 自動緩坡爬升（每 20ms +3 IBUS）
+3. Arduino 自動緩坡爬升（每 20ms +2 IBUS）
 4. 高度超過 15cm 後快照懸停油門，切換為 PID
 5. PID 繼續爬升至目標高度
 
