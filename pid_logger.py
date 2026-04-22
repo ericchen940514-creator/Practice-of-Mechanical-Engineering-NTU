@@ -12,6 +12,8 @@ _lock      = threading.Lock()
 _file      = None
 _writer    = None
 _start_t   = 0.0
+_log_dir   = 'pid_logs'
+_prefix    = 'althold'
 
 
 def _read_pid_from_ino() -> str:
@@ -33,11 +35,18 @@ def _read_pid_from_ino() -> str:
     return "Kp=? Ki=? Kd=?"
 
 
+def configure(log_dir: str = 'pid_logs', prefix: str = 'althold') -> None:
+    """在 start() 之前呼叫，設定儲存資料夾與檔名前綴。"""
+    global _log_dir, _prefix
+    _log_dir = log_dir
+    _prefix  = prefix
+
+
 def start(target_alt_cm: float) -> None:
     """定高啟動時呼叫，建立新的 CSV 檔案。"""
     global _file, _writer, _start_t
-    os.makedirs('pid_logs', exist_ok=True)
-    fname = os.path.join('pid_logs', f"althold_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(_log_dir, exist_ok=True)
+    fname = os.path.join(_log_dir, f"{_prefix}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
     pid_str = _read_pid_from_ino()
     with _lock:
         _file = open(fname, 'w', newline='', encoding='utf-8')

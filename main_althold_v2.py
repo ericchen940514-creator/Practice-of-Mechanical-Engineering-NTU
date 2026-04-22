@@ -41,10 +41,16 @@ TILT_EXPO     = 0.50
 YAW_EXPO      = 0.50
 
 ALT_STEP_DEFAULT = 10
-ALT_MAX_CM       = 100
+ALT_MAX_CM       = 90   # 與 Arduino MAX_ALT_CM 保持一致
+ALT_VEL_SCALE    = 40   # cm/s，定高模式下油門軸全推對應的最大爬升/下降速率
+
+# 平台誤觸保護：讀值下降速率超過此值（cm/s）視為平台突波，限制下降率
+ALT_SPIKE_MAX_DROP_RATE = 30.0  # cm/s
+STICK_RETURN_DEAD_ZONE  = 0.12
 
 # ── 手把按鍵編號 ──
 BTN_CIRCLE = 1
+BTN_CROSS  = 0
 BTN_SQUARE = 2
 BTN_TRI    = 3
 BTN_L1     = 9
@@ -53,6 +59,7 @@ BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT = 11, 12, 13, 14
 BTN_OPTIONS   = 6
 BTN_ESTOP_A   = 4
 BTN_ESTOP_B   = 6
+BTN_CALIB     = 15   # 右搖桿偏移補正（原 X 鍵，改到 15 防誤觸）
 
 # ==========================================
 # 藍牙工具
@@ -211,10 +218,10 @@ def read_gamepad(joystick, state):
                 state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
             if snap >= 0:
-                if snap >= 15:
-                    state['target_alt'] = round(min(ALT_MAX_CM, snap))
-                print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
-                print(" D-pad 上/下 調整目標高度 | D-pad 左/右 調整步進量")
+                state['target_alt'] = 25.0 if snap < 12 else max(12.0, min(float(ALT_MAX_CM), float(snap)))
+                state['last_alt_update_t'] = time.time()
+                print(f"\n🔒 定高啟動！目標高度：{state['target_alt']:.1f} cm")
+                print(" 左搖桿上/下 = 速率控制，放開自動定高 | D-pad 上/下 = 快速調整")
                 pid_logger.start(state['target_alt'])
             else:
                 state['alt_hold_active'] = False
@@ -224,17 +231,35 @@ def read_gamepad(joystick, state):
             print("\n🔓 定高關閉，回手動模式（等待 Arduino 同步基準油門）")
     state['prev_circle'] = curr_circle
 
-    # □ 鍵：搖桿校準（僅手動模式）
+    # □ 鍵：定高時→重新定義高度基準；手動時→搖桿校準
     curr_sq = joystick.get_button(BTN_SQUARE)
+    if curr_sq and not state['prev_sq']:
+        if state['alt_hold_active']:
+            state['reref_pending'] = True
+            print("\n🔄 高度基準重設中（等待感測器新讀值）...")
+        else:
+            state['offset'] = (
+                joystick.get_axis(1),
+                joystick.get_axis(0),
+                joystick.get_axis(3),
+                joystick.get_axis(2),
+            )
+            print("\n⚙️ 搖桿校準完成。")
     if curr_sq and not state['prev_sq'] and not state['alt_hold_active']:
-        state['offset'] = (
-            joystick.get_axis(1),
-            joystick.get_axis(0),
-            joystick.get_axis(3),
-            joystick.get_axis(2),
-        )
-        print("\n⚙️ 搖桿校準完成。")
+        state['right_stick_trim'] = (0.0, 0.0)
+        state['right_stick_recenter_required'] = False
     state['prev_sq'] = curr_sq
+
+    # 15：右搖桿偏移補正 trim（原 X 鍵，改到 15 防誤觸）
+    curr_calib = joystick.get_button(BTN_CALIB)
+    if curr_calib and not state['prev_calib']:
+        oy, ox, op, or_ = state['offset']
+        trim_pitch = apply_dead_zone(joystick.get_axis(3) - op)
+        trim_roll  = apply_dead_zone(joystick.get_axis(2) - or_)
+        state['right_stick_trim'] = (trim_pitch, trim_roll)
+        state['right_stick_recenter_required'] = True
+        print(f"[Trim] P:{trim_pitch:+.3f} R:{trim_roll:+.3f} 已記錄，搖桿回中後生效")
+    state['prev_calib'] = curr_calib
 
     # 方向鍵
     curr_up    = joystick.get_button(BTN_UP)
@@ -245,16 +270,16 @@ def read_gamepad(joystick, state):
     if state['alt_hold_active']:
         if curr_up    and not state['prev_up']:
             state['target_alt'] = min(ALT_MAX_CM, state['target_alt'] + state['alt_step'])
-            print(f"\n📡 目標高度 → {state['target_alt']} cm")
+            print(f"\n📡 目標高度 → {state['target_alt']:.1f} cm")
         if curr_down  and not state['prev_down']:
             state['target_alt'] = max(5, state['target_alt'] - state['alt_step'])
-            print(f"\n📡 目標高度 → {state['target_alt']} cm")
+            print(f"\n📡 目標高度 → {state['target_alt']:.1f} cm")
         if curr_right and not state['prev_right']:
             state['target_alt'] = min(ALT_MAX_CM, state['target_alt'] + 3)
-            print(f"\n📡 目標高度 → {state['target_alt']} cm")
+            print(f"\n📡 目標高度 → {state['target_alt']:.1f} cm")
         if curr_left  and not state['prev_left']:
             state['target_alt'] = max(5, state['target_alt'] - 3)
-            print(f"\n📡 目標高度 → {state['target_alt']} cm")
+            print(f"\n📡 目標高度 → {state['target_alt']:.1f} cm")
     else:
         if curr_up    and not state['prev_up']:
             state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
@@ -275,15 +300,35 @@ def read_gamepad(joystick, state):
     raw_pitch    = apply_dead_zone(joystick.get_axis(3) - op)
     raw_roll     = apply_dead_zone(joystick.get_axis(2) - or_)
 
+    if state['right_stick_recenter_required']:
+        right_pitch_centered = abs(joystick.get_axis(3)) < STICK_RETURN_DEAD_ZONE
+        right_roll_centered  = abs(joystick.get_axis(2)) < STICK_RETURN_DEAD_ZONE
+        if right_pitch_centered and right_roll_centered:
+            print("[Trim] 搖桿已回中，補正生效")
+        else:
+            raw_pitch = 0.0
+            raw_roll  = 0.0
+
+    trim_pitch, trim_roll = state['right_stick_trim']
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch))
+    raw_roll  = max(-1.0, min(1.0, raw_roll + trim_roll))
+
     # ★ 套用 Expo 指數曲線
     raw_throttle = apply_expo(raw_throttle, THROTTLE_EXPO)
     raw_yaw      = apply_expo(raw_yaw, YAW_EXPO)
     raw_pitch    = apply_expo(raw_pitch, TILT_EXPO)
     raw_roll     = apply_expo(raw_roll, TILT_EXPO)
 
-    # ── 定高模式：送固定 base_throttle，不加搖桿偏移 ──
+    # ── 定高模式：油門軸控制爬升速率，放開搖桿自動凍結目標高度 ──
     # ── 手動模式：base_throttle + 搖桿暫時調整 ──
     if state['alt_hold_active']:
+        _now = time.time()
+        _dt  = min(_now - state['last_alt_update_t'], 0.2)
+        state['last_alt_update_t'] = _now
+        vel = -raw_throttle * ALT_VEL_SCALE   # 搖桿往上 → 正速率 → 目標高度增加
+        if abs(vel) > 0.5 and not _alt_frozen:
+            state['target_alt'] = max(5.0, min(float(ALT_MAX_CM),
+                                               state['target_alt'] + vel * _dt))
         final_throttle = state['base_throttle']
     else:
         final_throttle = max(0, min(255,
@@ -345,10 +390,10 @@ def read_keyboard(state):
                 state['base_throttle'] + int(-raw_t * JOYSTICK_SENSITIVITY)))
             snap = get_alt_snapshot()
             if snap >= 0:
-                if snap >= 15:
-                    state['target_alt'] = round(min(ALT_MAX_CM, snap))
-                print(f"\n🔒 定高啟動！目標高度：{state['target_alt']} cm")
-                print(" Tab=高度↑ Shift=高度↓")
+                state['target_alt'] = 25.0 if snap < 12 else max(12.0, min(float(ALT_MAX_CM), float(snap)))
+                state['last_alt_update_t'] = time.time()
+                print(f"\n🔒 定高啟動！目標高度：{state['target_alt']:.1f} cm")
+                print(" W/S = 速率控制，放開自動定高 | Tab/Shift = 快速調整")
                 pid_logger.start(state['target_alt'])
             else:
                 state['alt_hold_active'] = False
@@ -362,10 +407,10 @@ def read_keyboard(state):
     if state['alt_hold_active']:
         if kb_triggered('tab'):
             state['target_alt'] = min(ALT_MAX_CM, state['target_alt'] + state['alt_step'])
-            print(f"\n📡 目標高度 → {state['target_alt']} cm")
+            print(f"\n📡 目標高度 → {state['target_alt']:.1f} cm")
         if kb_triggered('shift'):
             state['target_alt'] = max(5, state['target_alt'] - state['alt_step'])
-            print(f"\n📡 目標高度 → {state['target_alt']} cm")
+            print(f"\n📡 目標高度 → {state['target_alt']:.1f} cm")
     else:
         if kb_triggered('tab'):
             state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
@@ -388,6 +433,13 @@ def read_keyboard(state):
     raw_roll     = apply_expo(raw_roll_in, TILT_EXPO)
 
     if state['alt_hold_active']:
+        _now = time.time()
+        _dt  = min(_now - state['last_alt_update_t'], 0.2)
+        state['last_alt_update_t'] = _now
+        vel = -raw_throttle * ALT_VEL_SCALE
+        if abs(vel) > 0.5 and not _alt_frozen:
+            state['target_alt'] = max(5.0, min(float(ALT_MAX_CM),
+                                               state['target_alt'] + vel * _dt))
         final_throttle = state['base_throttle']
     else:
         final_throttle = max(0, min(255,
@@ -400,6 +452,13 @@ def read_keyboard(state):
         else:
             state['arm_state'] = 0
     state['prev_r'] = curr_r
+
+    # F 鍵：定高時重新定義高度基準
+    curr_f = kb.is_pressed('f')
+    if curr_f and not state['prev_f'] and state['alt_hold_active']:
+        state['reref_pending'] = True
+        print("\n🔄 高度基準重設中（等待感測器新讀值）...")
+    state['prev_f'] = curr_f
 
     if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
     if kb.is_pressed('e'): state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
@@ -427,7 +486,10 @@ def draw_status(screen, font, state, mode, channels, connected):
 
     with _alt_lock:
         cur_alt = _current_alt
-    alt_str = f"{cur_alt:.1f} cm" if cur_alt >= 0 else "---"
+    if _alt_frozen:
+        alt_str = f"{cur_alt:.1f} cm [平台凍結 → 按□/F重設]"
+    else:
+        alt_str = f"{cur_alt:.1f} cm" if cur_alt >= 0 else "---"
 
     if state['alt_hold_active']:
         if _pid_throttle >= 0:
@@ -435,7 +497,7 @@ def draw_status(screen, font, state, mode, channels, connected):
             pid_str = f" PID油門: {pid_conv}"
         else:
             pid_str = ""
-        throttle_str = f"目標高度: {state['target_alt']:3d} cm (步進:{state['alt_step']:2d}cm){pid_str}"
+        throttle_str = f"目標高度: {state['target_alt']:5.1f} cm (步進:{state['alt_step']:2d}cm){pid_str}"
     else:
         throttle_str = f"油門: {channels['throttle']:3d} 基準: {state['base_throttle']:3d}(步進:{state['throttle_step']:2d})"
 
@@ -449,7 +511,7 @@ def draw_status(screen, font, state, mode, channels, connected):
         (f"夾爪: {state['gripper_val']:3d} (L1/R1) Y: {channels['yaw']:3d} "
          f"P: {channels['pitch']:3d} R: {channels['roll']:3d} COM: {COM_PORT}",
          (180, 180, 180)),
-        ("○/H=定高切換 定高:上下=大步 左右=±3cm 手動:上下=油門 Options/X長按3秒=退出 4+6=緊急停機",
+        ("○/H=定高切換 定高:左搖桿=速率控制 D-pad上下=大步 手動:上下=油門 Options/X長按3秒=退出 4+6=緊急停機",
          (110, 110, 110)),
     ]
     for i, (text, color) in enumerate(lines):
@@ -493,15 +555,20 @@ state = {
     'is_exiting':     False,
     'exit_press_time': 0,
     # 定高
-    'alt_hold_active': False,
-    'target_alt':      25,
-    'alt_step':        ALT_STEP_DEFAULT,
+    'alt_hold_active':  False,
+    'target_alt':       25.0,
+    'alt_step':         ALT_STEP_DEFAULT,
+    'last_alt_update_t': 0.0,
     # 手把
     'offset':     (0.0, 0.0, 0.0, 0.0),
-    'prev_sq':    0, 'prev_tri': 0, 'prev_circle': 0,
+    'right_stick_trim': (0.0, 0.0),
+    'right_stick_recenter_required': False,
+    'prev_sq':    0, 'prev_tri': 0, 'prev_circle': 0, 'prev_cross': 0, 'prev_calib': 0,
     'prev_up':    0, 'prev_down': 0, 'prev_left': 0, 'prev_right': 0,
+    # 定高重設
+    'reref_pending': False,
     # 鍵盤
-    'prev_r':     False, 'prev_h': False,
+    'prev_r':     False, 'prev_h': False, 'prev_f': False,
 }
 
 channels = {'throttle': 0, 'target_alt': 0, 'yaw': 127, 'pitch': 127, 'roll': 127, 'ah_val': 0}
@@ -518,6 +585,13 @@ _current_alt = -1
 _alt_history = deque(maxlen=10)
 _pid_throttle = -1  # Arduino 定高 PID 實際油門（IBUS 1000~2000），-1 表示尚無資料
 
+# 平台突波濾波器狀態
+_alt_last_accepted   = -1.0
+_alt_last_accept_t   =  0.0
+
+# Arduino 硬凍結旗標（感測器讀值被 outlier reject 連續攔截 → 無法提供高度反饋）
+_alt_frozen = False
+
 
 def get_alt_snapshot():
     with _alt_lock:
@@ -526,7 +600,7 @@ def get_alt_snapshot():
         return round(sum(_alt_history) / len(_alt_history), 1)
 
 def _serial_reader():
-    global _current_alt, _pid_throttle
+    global _current_alt, _pid_throttle, _alt_last_accepted, _alt_last_accept_t, _alt_frozen
     while True:
         with _serial_lock:
             ser = bt_serial
@@ -540,6 +614,18 @@ def _serial_reader():
                 # 高度回報
                 mm  = int(line[2:])
                 val = round(mm / 10.0, 1)
+                now_t = time.time()
+
+                # 平台突波濾波：限制讀值下降速率，防止飛到平台上時誤判墜落
+                if _alt_last_accepted >= 0:
+                    dt = now_t - _alt_last_accept_t
+                    if dt > 0:
+                        drop_rate = (_alt_last_accepted - val) / dt
+                        if drop_rate > ALT_SPIKE_MAX_DROP_RATE:
+                            val = round(max(0.0, _alt_last_accepted - ALT_SPIKE_MAX_DROP_RATE * dt), 1)
+                _alt_last_accepted = val
+                _alt_last_accept_t = now_t
+
                 with _alt_lock:
                     _current_alt = val
                     _alt_history.append(val)
@@ -548,6 +634,22 @@ def _serial_reader():
             elif line.startswith('P:'):
                 # 定高中 PID 實際輸出油門（IBUS 1000~2000）
                 _pid_throttle = int(line[2:])
+
+            elif line.startswith('F:'):
+                # 感測器凍結狀態通知（F:1=凍結中, F:0=已恢復）
+                _alt_frozen = (line[2:3] == '1')
+                if not _alt_frozen:
+                    _alt_last_accepted = -1.0   # 解凍後重置 spike filter
+
+            elif line.startswith('N:'):
+                # 高度基準重設完成，Arduino 回傳新的高度（mm）
+                mm  = int(line[2:])
+                val = round(mm / 10.0, 1)
+                val = max(5.0, min(float(ALT_MAX_CM), val))
+                with _state_lock:
+                    state['target_alt']       = val
+                    state['last_alt_update_t'] = time.time()
+                print(f"\n✅ 高度基準已重設：{val:.1f} cm（現在可用搖桿降落）")
 
             elif line.startswith('T:'):
                 # ── 定高結束，Arduino 回傳最後 PID 油門（IBUS 值 1000~2000） ──
@@ -565,12 +667,14 @@ def _serial_reader():
             time.sleep(0.05)
 
 def _do_reconnect():
-    global bt_serial, _reconnecting, reconnect_cooldown
+    global bt_serial, _reconnecting, reconnect_cooldown, _alt_last_accepted, _alt_last_accept_t
     new_ser = connect_serial()
     with _serial_lock:
         bt_serial = new_ser
     state['arm_state']       = 0
     state['alt_hold_active'] = False
+    _alt_last_accepted = -1.0
+    _alt_last_accept_t =  0.0
     _reconnecting      = False
     reconnect_cooldown = time.time() + 3.0
 
@@ -578,13 +682,13 @@ threading.Thread(target=_serial_reader, daemon=True).start()
 
 if mode == 'gamepad':
     print("\n🎮 手把模式已上線！（定高 Expo 版）")
-    print("△=解鎖/上鎖 ○=定高切換 □=搖桿校準")
-    print("定高開啟時：D-pad上下=目標高度±大步 D-pad左右=目標高度±3cm")
+    print("△=解鎖/上鎖 ○=定高切換 □=定高時重設基準  15=右搖桿偏移補正")
+    print("定高開啟時：左搖桿上下=爬升速率 放開=定高 D-pad上下=快速調整")
     print("手動模式時：D-pad上下=基準油門± Options長按3秒=退出 4+6=緊急停機\n")
 else:
     print("\n⌨️ 鍵盤模式已上線！（定高 Expo 版，全域輸入，不需點選視窗）")
     print("W/S=油門 A/D=偏航 ↑↓=俯仰 ←→=翻滾 R=解鎖/上鎖 H=定高切換")
-    print("定高開啟時：Tab=高度↑ Shift=高度↓")
+    print("定高開啟時：W/S=爬升速率 放開=定高 Tab/Shift=快速調整 F=重設高度基準")
     print("手動模式時：Tab=油門↑ Shift=油門↓ C/Z=步進± X長按3秒=退出\n")
 
 try:
@@ -613,6 +717,13 @@ try:
 
         if should_exit:
             break
+
+        # 高度基準重設：這一幀送 ah_val=2（one-shot），並重置 Python 側 spike filter
+        if state['reref_pending'] and state['alt_hold_active']:
+            state['reref_pending'] = False
+            channels['ah_val']     = 2
+            _alt_last_accepted     = -1.0
+            _alt_last_accept_t     =  0.0
 
         # base_throttle 可能被背景執行緒更新，讀取時加鎖
         with _state_lock:
@@ -665,7 +776,7 @@ try:
                 ah_str = f"手動:{channels['throttle']:3d}"
             with _alt_lock:
                 cur = _current_alt
-            cur_str = f"{cur:.1f}cm" if cur >= 0 else " ---"
+            cur_str = f"{cur:.1f}cm{'[凍]' if _alt_frozen else ''}" if cur >= 0 else " ---"
             print(f"[{conn_str}] {arm_str} | {ah_str} | 當前:{cur_str} | "
                   f"基準:{current_base:3d} | 夾爪:{state['gripper_val']:3d} | "
                   f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}",

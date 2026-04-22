@@ -36,7 +36,8 @@ int   manual_throttle = 1500;
 float v_est          = 0;       // 速度估計 (cm/s)
 float integral_vel   = 0;       // 內環速度積分
 float last_vel_error = 0;
-float prev_cm_filt   = -1;
+float prev_cm_filt   = -1;      // 速度估計用（只在接受讀值時更新）
+float prev_cm_raw    = -1;      // outlier 邊界追蹤（拒絕時也更新）
 int   hover_estimate = 1400;
 
 unsigned long last_pid_time    = 0;
@@ -49,6 +50,15 @@ float prev_filtered_mm = -1;
 bool  filter_inited    = false;
 unsigned long last_sensor_time = 0;
 unsigned long last_alt_report  = 0;
+
+// 平台突波濾波器狀態
+float         spike_accepted_mm    = -1.0f;
+unsigned long spike_accepted_t     = 0;
+bool          pending_target_update = false;  // 高度基準重設：等下一次 sensor 讀值後更新 target
+
+// 凍結狀態偵測（hardOutlierReject 連續觸發 → Python 顯示警示）
+bool alt_reading_frozen = false;
+int  freeze_count       = 0;
 
 // ─────────────────────────────────────────
 // 【第 4 版】串級 PID 參數 ─ Yo-Yo + 抗積分風暴 最終保守版
@@ -64,11 +74,12 @@ const float MAX_THR_OFFSET    = 185.0f;
 const float ALPHA             = 0.35f;    // 位置 EMA
 const float GAMMA             = 0.20f;    // 速度 EMA
 
-const int   TAKEOFF_LIFTOFF_CM    = 20;   // 晚一點切 PID
+const int   TAKEOFF_LIFTOFF_CM    = 12;   // 晚一點切 PID
 const int   TAKEOFF_MAX_IBUS      = 1627;
 const unsigned long TAKEOFF_TIMEOUT_MS = 8000;
 const float MAX_ALT_CM            = 90.0f;
 const int   MAX_THR_STEP          = 10;
+const float ALT_SPIKE_MAX_DROP_RATE = 30.0f;  // cm/s, 下降速率上限（防平台誤觸）
 
 // ─────────────────────────────────────────
 // IBUS 發送
@@ -103,10 +114,12 @@ void updateAltHold(float filt_mm) {
   if (current_cm > 130) return;
 
   // 高度突變保護（防 outlier）
-  if (prev_cm_filt > 0 && fabs(current_cm - prev_cm_filt) > 15.0f) {
-    prev_cm_filt = current_cm;
-    return;
+  // prev_cm_raw 追蹤邊界（拒絕時也更新），prev_cm_filt 只在接受時更新（保護速度估計）
+  if (prev_cm_raw > 0 && fabs(current_cm - prev_cm_raw) > 15.0f) {
+    prev_cm_raw = current_cm;   // 更新邊界讓下一拍能恢復
+    return;                     // prev_cm_filt 保持不動，避免速度估計飛衝
   }
+  prev_cm_raw = current_cm;
 
   float effective_target = (current_cm > MAX_ALT_CM) ? MAX_ALT_CM : target_alt_cm;
 
@@ -180,6 +193,7 @@ void updateTakeoff() {
     integral_vel   = 0;
     last_vel_error = 0;
     prev_cm_filt   = cur_alt;
+    prev_cm_raw    = cur_alt;
     if (prev_filtered_mm > 0 && filtered_mm > 0) {
       v_est = (filtered_mm - prev_filtered_mm) / 0.02f / 10.0f;
     } else {
@@ -257,6 +271,7 @@ void loop() {
             last_vel_error = 0;
             v_est          = 0;
             prev_cm_filt   = -1;
+            prev_cm_raw    = -1;
             last_pid_time  = millis();
             alt_hold_active = true;
 
@@ -269,6 +284,7 @@ void loop() {
               takeoff_phase  = false;
               hover_estimate = manual_throttle;
               prev_cm_filt   = cur_alt;
+              prev_cm_raw    = cur_alt;
               if (prev_filtered_mm > 0 && filtered_mm > 0) {
                 v_est = (filtered_mm - prev_filtered_mm) / 0.02f / 10.0f;
               }
@@ -280,6 +296,17 @@ void loop() {
           if (abs(new_target - target_alt_cm) > 0.5f) {
             target_alt_cm = new_target;
           }
+
+        } else if (ah_val == 2 && alt_hold_active) {
+          // 高度基準重設：解凍感測器，等下一個讀值後重新定義 target_alt_cm
+          filter_inited         = false;
+          spike_accepted_mm     = -1.0f;
+          pending_target_update = true;
+          integral_vel          = 0;
+          last_vel_error        = 0;
+          v_est                 = 0;
+          prev_cm_filt          = -1;
+          prev_cm_raw           = -1;
 
         } else if (ah_val == 0 && alt_hold_active) {
           int exit_thr     = ibus_channels[2];
@@ -304,17 +331,55 @@ void loop() {
     if (!altSensor.timeoutOccurred() && mm > 0 && mm < 2000) {
       float new_filt = (float)mm;
       
-      // Outlier Rejection：±200mm 以上直接忽略
+      // Outlier Rejection：±200mm 以上直接忽略；記錄是否被拒絕
+      bool was_rejected = false;
       if (filter_inited && fabs(new_filt - filtered_mm) > 200.0f) {
-        new_filt = filtered_mm;
+        new_filt      = filtered_mm;
+        was_rejected  = true;
       }
-      
+
+      // 凍結狀態通知 Python（連續 3 次被拒絕 → 送 F:1；恢復後送 F:0）
+      if (was_rejected) {
+        if (++freeze_count >= 3 && !alt_reading_frozen) {
+          alt_reading_frozen = true;
+          BTSerial.print("F:1\n");
+        }
+      } else {
+        freeze_count = 0;
+        if (alt_reading_frozen) {
+          alt_reading_frozen = false;
+          BTSerial.print("F:0\n");
+        }
+      }
+
       if (!filter_inited) {
         filtered_mm   = new_filt;
         filter_inited = true;
       } else {
         prev_filtered_mm = filtered_mm;
         filtered_mm = ALPHA * new_filt + (1.0f - ALPHA) * filtered_mm;
+      }
+
+      // 平台突波濾波：限制 filtered_mm 的下降速率，防止飛到平台上時 PID 誤判墜落
+      float filt_cm = filtered_mm / 10.0f;
+      if (spike_accepted_mm >= 0 && last_sensor_time > spike_accepted_t) {
+        float dt_s = (last_sensor_time - spike_accepted_t) / 1000.0f;
+        float drop_rate = (spike_accepted_mm - filt_cm) / dt_s;
+        if (drop_rate > ALT_SPIKE_MAX_DROP_RATE) {
+          filt_cm     = spike_accepted_mm - ALT_SPIKE_MAX_DROP_RATE * dt_s;
+          filtered_mm = filt_cm * 10.0f;
+        }
+      }
+      spike_accepted_mm = filt_cm;
+      spike_accepted_t  = last_sensor_time;
+
+      // 高度基準重設完成：以新讀值為 target，通知 Python
+      if (pending_target_update) {
+        target_alt_cm         = constrain(filt_cm, 3.0f, MAX_ALT_CM);
+        pending_target_update = false;
+        char nbuf[16];
+        snprintf(nbuf, sizeof(nbuf), "N:%d\n", (int)filtered_mm);
+        BTSerial.print(nbuf);
       }
     }
   }
