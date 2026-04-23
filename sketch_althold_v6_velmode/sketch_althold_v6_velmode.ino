@@ -49,14 +49,14 @@ const float Kp_vel            = 0.80f;   // 速度誤差 P：直接推油門
 const float Ki_vel            = 1.20f;   // 積分負責找到懸停油門 + 維持速度
 const float Kd_vel            = 0.0f;    // 速度模式不用 D：搖桿跳動會讓 D 項暴衝
 const float MAX_VEL_CMD       = 60.0f;
-const float MAX_INTEGRAL_VEL  = 185.0f; // 允許積分完整補償懸停誤差
-const float MAX_THR_OFFSET    = 185.0f;
+const float MAX_INTEGRAL_VEL  = 220.0f; // 允許積分完整補償懸停誤差
+const float MAX_THR_OFFSET    = 220.0f;
 
 const float ALPHA             = 0.35f;
 const float GAMMA             = 0.20f;
 
 const float MAX_ALT_CM            = 120.0f;
-const int   MAX_THR_STEP          = 10;
+const int   MAX_THR_STEP          = 20;
 
 void sendIBUS() {
   uint8_t packet[32];
@@ -86,7 +86,9 @@ void updateAltHold(float filt_mm) {
   if (current_cm > 130) return;
 
   if (prev_cm_raw > 0 && fabs(current_cm - prev_cm_raw) > 15.0f) {
-    prev_cm_raw = current_cm;
+    prev_cm_raw  = current_cm;
+    prev_cm_filt = current_cm;   // 重設基準，防止下一拍速度估計爆炸
+    v_est = 0;                   // 清除殘留速度估計
     return;
   }
   prev_cm_raw = current_cm;
@@ -97,9 +99,9 @@ void updateAltHold(float filt_mm) {
     safe_vel_cmd = min(safe_vel_cmd, -5.0f);
   }
 
-  // 速度估計
+  // 速度估計（clamp 防感測器雜訊產生不合理速度）
   if (prev_cm_filt < 0) prev_cm_filt = current_cm;
-  float v_raw = (current_cm - prev_cm_filt) / dt;
+  float v_raw = constrain((current_cm - prev_cm_filt) / dt, -100.0f, 100.0f);
   v_est = GAMMA * v_raw + (1.0f - GAMMA) * v_est;
   prev_cm_filt = current_cm;
 
@@ -244,6 +246,7 @@ void loop() {
         was_rejected = true;
       }
 
+      bool skip_ema = false;
       if (was_rejected) {
         if (++freeze_count >= 5) {
           // 連續 5 次被拒絕：真實高度已改變，強制接受新讀值並重置濾波器
@@ -254,6 +257,13 @@ void loop() {
           filtered_mm   = (float)mm;
           filter_inited = true;
           freeze_count  = 0;
+          skip_ema      = true;   // 這拍直接用原始值，不做 EMA 混合
+          // 高度已確認大幅改變，清除 PID 狀態，防止舊積分造成突然上衝
+          integral_vel   = 0;
+          last_vel_error = 0;
+          v_est          = 0;
+          prev_cm_filt   = -1;
+          prev_cm_raw    = -1;
         }
       } else {
         freeze_count = 0;
@@ -266,7 +276,7 @@ void loop() {
       if (!filter_inited) {
         filtered_mm   = new_filt;
         filter_inited = true;
-      } else {
+      } else if (!skip_ema) {
         prev_filtered_mm = filtered_mm;
         filtered_mm = ALPHA * new_filt + (1.0f - ALPHA) * filtered_mm;
       }

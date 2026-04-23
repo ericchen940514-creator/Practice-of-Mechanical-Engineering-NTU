@@ -196,7 +196,8 @@ def read_gamepad(joystick, state):
         if state['alt_hold_active']:
             snap = get_alt_snapshot()
             if snap >= 0:
-                pid_logger.start(snap)
+                if state['arm_state'] == 255:
+                    pid_logger.start(snap)
                 print(f"\n🔒 速度模式啟動！當前高度：{snap:.1f} cm")
                 print(" 左搖桿死區=懸停(vel=0)，推上/下=爬升/下降速率")
             else:
@@ -222,15 +223,18 @@ def read_gamepad(joystick, state):
             print("\n⚙️ 搖桿校準完成。")
     state['prev_sq'] = curr_sq
 
-    # 15：右搖桿偏移補正 trim（原 X 鍵，改到 15 防誤觸）
+    # 15：右搖桿偏移補正 trim（搖桿推到補正位置後按，置中後補正量自動生效）
     curr_calib = joystick.get_button(BTN_CALIB)
     if curr_calib and not state['prev_calib']:
         oy, ox, op, or_ = state['offset']
-        trim_pitch = apply_dead_zone(joystick.get_axis(3) - op)
-        trim_roll  = apply_dead_zone(joystick.get_axis(2) - or_)
-        state['right_stick_trim'] = (trim_pitch, trim_roll)
+        current_stick_pitch = apply_expo(apply_dead_zone(joystick.get_axis(3) - op), TILT_EXPO)
+        current_stick_roll  = apply_expo(apply_dead_zone(joystick.get_axis(2) - or_), TILT_EXPO)
+        old_trim_pitch, old_trim_roll = state['right_stick_trim']
+        new_trim_pitch = max(-1.0, min(1.0, old_trim_pitch + current_stick_pitch))
+        new_trim_roll  = max(-1.0, min(1.0, old_trim_roll  + current_stick_roll))
+        state['right_stick_trim'] = (new_trim_pitch, new_trim_roll)
         state['right_stick_recenter_required'] = True
-        print(f"[Trim] P:{trim_pitch:+.3f} R:{trim_roll:+.3f} 已記錄，搖桿回中後生效")
+        print(f"[Trim] P:{new_trim_pitch:+.3f} R:{new_trim_roll:+.3f} 已記錄並凍結，請將搖桿置中")
     state['prev_calib'] = curr_calib
 
     # 方向鍵：手動模式下調整基準油門
@@ -273,7 +277,8 @@ def read_gamepad(joystick, state):
     raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll))
 
     if state['alt_hold_active']:
-        vel_cmd = -raw_throttle * ALT_VEL_SCALE
+        raw_throttle_vel = apply_dead_zone(_thr_raw)
+        vel_cmd = -raw_throttle_vel * ALT_VEL_SCALE
         alt_byte = encode_vel(vel_cmd)
         final_throttle = state['base_throttle']
     else:
@@ -290,7 +295,13 @@ def read_gamepad(joystick, state):
     if curr_tri and not state['prev_tri']:
         if state['arm_state'] == 0 and final_throttle <= 5:
             state['arm_state'] = 255
+            if state['alt_hold_active']:
+                snap = get_alt_snapshot()
+                if snap >= 0:
+                    pid_logger.start(snap)
         else:
+            if state['alt_hold_active']:
+                pid_logger.stop()
             state['arm_state'] = 0
     state['prev_tri'] = curr_tri
 
@@ -331,7 +342,8 @@ def read_keyboard(state):
             snap = get_alt_snapshot()
             if snap >= 0:
                 state['last_alt_update_t'] = time.time()
-                pid_logger.start(snap)
+                if state['arm_state'] == 255:
+                    pid_logger.start(snap)
                 print(f"\n🔒 速度模式定高啟動！當前高度：{snap:.1f} cm")
             else:
                 state['alt_hold_active'] = False
@@ -361,7 +373,9 @@ def read_keyboard(state):
     raw_roll     = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left') else 0.0) + (1.0 if kb.is_pressed('right') else 0.0))), TILT_EXPO)
 
     if state['alt_hold_active']:
-        vel_cmd    = -raw_throttle * ALT_VEL_SCALE
+        raw_throttle_vel = apply_dead_zone(max(-1.0, min(1.0,
+            (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0))))
+        vel_cmd    = -raw_throttle_vel * ALT_VEL_SCALE
         alt_byte   = encode_vel(vel_cmd)
         final_throttle = state['base_throttle']
     else:
@@ -377,7 +391,13 @@ def read_keyboard(state):
     if curr_r and not state['prev_r']:
         if state['arm_state'] == 0 and final_throttle <= 5:
             state['arm_state'] = 255
+            if state['alt_hold_active']:
+                snap = get_alt_snapshot()
+                if snap >= 0:
+                    pid_logger.start(snap)
         else:
+            if state['alt_hold_active']:
+                pid_logger.stop()
             state['arm_state'] = 0
     state['prev_r'] = curr_r
 
@@ -523,7 +543,7 @@ def _serial_reader():
                 with _alt_lock:
                     _current_alt = val
                     _alt_history.append(val)
-                pid_logger.record(val, 0, _pid_throttle)
+                pid_logger.record(val, 0, _pid_throttle, channels.get('vel_cmd', 0))
             elif line.startswith('P:'):
                 _pid_throttle = int(line[2:])
             elif line.startswith('T:'):
