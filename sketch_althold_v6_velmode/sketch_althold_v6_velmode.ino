@@ -30,7 +30,7 @@ float integral_vel   = 0;
 float last_vel_error = 0;
 float prev_cm_filt   = -1;
 float prev_cm_raw    = -1;
-int   hover_estimate = 1400;
+int   hover_estimate = 1500;
 
 unsigned long last_pid_time    = 0;
 
@@ -201,8 +201,8 @@ void loop() {
             received_vel_cmd = 0;
             last_pid_time    = millis();
             // manual_throttle 可能因 Python base_throttle=0 而是 1000，
-            // 太低的話用 1400 當懸停基準，讓積分從合理起點開始收斂
-            hover_estimate   = (manual_throttle >= 1250) ? manual_throttle : 1400;
+            // 太低的話用 1500 當懸停基準，讓積分從合理起點開始收斂
+            hover_estimate   = (manual_throttle >= 1250) ? manual_throttle : 1500;
             alt_hold_active  = true;
           }
 

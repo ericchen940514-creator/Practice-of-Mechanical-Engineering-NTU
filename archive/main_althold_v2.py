@@ -250,15 +250,16 @@ def read_gamepad(joystick, state):
         state['right_stick_recenter_required'] = False
     state['prev_sq'] = curr_sq
 
-    # 15：右搖桿偏移補正 trim（原 X 鍵，改到 15 防誤觸）
+    # 15：右搖桿重新校準中心點（把當下位置設為新的零點，放開搖桿後生效）
     curr_calib = joystick.get_button(BTN_CALIB)
     if curr_calib and not state['prev_calib']:
-        oy, ox, op, or_ = state['offset']
-        trim_pitch = apply_dead_zone(joystick.get_axis(3) - op)
-        trim_roll  = apply_dead_zone(joystick.get_axis(2) - or_)
-        state['right_stick_trim'] = (trim_pitch, trim_roll)
+        oy, ox, _, _ = state['offset']
+        new_op = joystick.get_axis(3)
+        new_or = joystick.get_axis(2)
+        state['offset'] = (oy, ox, new_op, new_or)
+        state['right_stick_trim'] = (0.0, 0.0)
         state['right_stick_recenter_required'] = True
-        print(f"[Trim] P:{trim_pitch:+.3f} R:{trim_roll:+.3f} 已記錄，搖桿回中後生效")
+        print(f"\n⚙️ 右搖桿校準完成。P_offset:{new_op:+.3f} R_offset:{new_or:+.3f}，放開搖桿後生效")
     state['prev_calib'] = curr_calib
 
     # 方向鍵

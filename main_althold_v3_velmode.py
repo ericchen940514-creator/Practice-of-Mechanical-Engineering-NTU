@@ -108,6 +108,24 @@ def encode_vel(vel_cm_s):
 
 _key_held_start  = {}
 _key_last_repeat = {}
+_btn_held_start  = {}
+_btn_last_repeat = {}
+
+def btn_triggered(name, pressed, initial=0.30, repeat=0.10):
+    if not pressed:
+        _btn_held_start.pop(name, None)
+        _btn_last_repeat.pop(name, None)
+        return False
+    now = time.time()
+    if name not in _btn_held_start:
+        _btn_held_start[name] = now
+        _btn_last_repeat[name] = now
+        return True
+    if now - _btn_held_start[name] >= initial:
+        if now - _btn_last_repeat[name] >= repeat:
+            _btn_last_repeat[name] = now
+            return True
+    return False
 
 def kb_triggered(key, initial=0.25, repeat=0.10):
     if not kb.is_pressed(key):
@@ -205,7 +223,8 @@ def read_gamepad(joystick, state):
                 print("\n⚠️ 感測器尚無資料，無法切入。")
         else:
             pid_logger.stop()
-            state['syncing_throttle'] = True
+            state['syncing_throttle']   = True
+            state['syncing_throttle_t'] = time.time()
             print("\n🔓 定高關閉，等待油門同步...")
     state['prev_circle'] = curr_circle
 
@@ -244,13 +263,13 @@ def read_gamepad(joystick, state):
     curr_right = joystick.get_button(BTN_RIGHT)
 
     if not state['alt_hold_active']:
-        if curr_up    and not state['prev_up']:
+        if btn_triggered('dpad_up',    curr_up):
             state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
-        if curr_down  and not state['prev_down']:
+        if btn_triggered('dpad_down',  curr_down):
             state['base_throttle'] = max(0,   state['base_throttle'] - state['throttle_step'])
-        if curr_right and not state['prev_right']:
+        if btn_triggered('dpad_right', curr_right):
             state['throttle_step'] = min(20, state['throttle_step'] + 1)
-        if curr_left  and not state['prev_left']:
+        if btn_triggered('dpad_left',  curr_left):
             state['throttle_step'] = max(1,  state['throttle_step'] - 1)
 
     state['prev_up'],   state['prev_down']  = curr_up,   curr_down
@@ -276,6 +295,14 @@ def read_gamepad(joystick, state):
     raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch))
     raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll))
 
+    # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖並跳到 60
+    if state['arm_pending'] and not state['alt_hold_active']:
+        if time.time() - state['arm_pending_t'] >= 0.25:
+            state['arm_pending']    = False
+            state['arm_state']      = 255
+            state['base_throttle']  = 60
+            print("\n✅ 解鎖！")
+
     if state['alt_hold_active']:
         raw_throttle_vel = apply_dead_zone(_thr_raw)
         vel_cmd = -raw_throttle_vel * ALT_VEL_SCALE
@@ -284,8 +311,12 @@ def read_gamepad(joystick, state):
     else:
         vel_cmd    = 0
         alt_byte   = 128
-        # 同步期間凍結搖桿輸入，避免舊油門拉扯
-        if state['syncing_throttle']:
+        if state['arm_pending']:
+            final_throttle = 0
+        elif state['syncing_throttle']:
+            if time.time() - state['syncing_throttle_t'] > 5.0:
+                state['syncing_throttle'] = False
+                print("\n⚠️ 油門同步逾時，已自動解除凍結。")
             final_throttle = state['base_throttle']
         else:
             final_throttle = max(0, min(255,
@@ -293,16 +324,23 @@ def read_gamepad(joystick, state):
 
     curr_tri = joystick.get_button(BTN_TRI)
     if curr_tri and not state['prev_tri']:
-        if state['arm_state'] == 0 and final_throttle <= 5:
-            state['arm_state'] = 255
+        if state['arm_state'] == 0 and not state['arm_pending']:
             if state['alt_hold_active']:
+                state['arm_state'] = 255
                 snap = get_alt_snapshot()
                 if snap >= 0:
                     pid_logger.start(snap)
+            else:
+                state['arm_pending']   = True
+                state['arm_pending_t'] = time.time()
+                state['base_throttle'] = 0
+                print("\n⏳ 解鎖中...")
         else:
             if state['alt_hold_active']:
                 pid_logger.stop()
-            state['arm_state'] = 0
+            state['arm_pending']   = False
+            state['arm_state']     = 0
+            state['base_throttle'] = 90
     state['prev_tri'] = curr_tri
 
     if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -350,7 +388,8 @@ def read_keyboard(state):
                 print("\n⚠️ 感測器尚無資料，無法切入定高。")
         else:
             pid_logger.stop()
-            state['syncing_throttle'] = True
+            state['syncing_throttle']   = True
+            state['syncing_throttle_t'] = time.time()
             print("\n🔓 定高關閉，等待油門同步...")
     state['prev_h'] = curr_h
 
@@ -372,6 +411,14 @@ def read_keyboard(state):
     raw_pitch    = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('up') else 0.0) + (1.0 if kb.is_pressed('down') else 0.0))), TILT_EXPO)
     raw_roll     = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left') else 0.0) + (1.0 if kb.is_pressed('right') else 0.0))), TILT_EXPO)
 
+    # 解鎖序列
+    if state['arm_pending'] and not state['alt_hold_active']:
+        if time.time() - state['arm_pending_t'] >= 0.25:
+            state['arm_pending']    = False
+            state['arm_state']      = 255
+            state['base_throttle']  = 60
+            print("\n✅ 解鎖！")
+
     if state['alt_hold_active']:
         raw_throttle_vel = apply_dead_zone(max(-1.0, min(1.0,
             (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0))))
@@ -381,7 +428,12 @@ def read_keyboard(state):
     else:
         vel_cmd    = 0
         alt_byte   = 128
-        if state['syncing_throttle']:
+        if state['arm_pending']:
+            final_throttle = 0
+        elif state['syncing_throttle']:
+            if time.time() - state['syncing_throttle_t'] > 5.0:
+                state['syncing_throttle'] = False
+                print("\n⚠️ 油門同步逾時，已自動解除凍結。")
             final_throttle = state['base_throttle']
         else:
             final_throttle = max(0, min(255,
@@ -389,16 +441,23 @@ def read_keyboard(state):
 
     curr_r = kb.is_pressed('r')
     if curr_r and not state['prev_r']:
-        if state['arm_state'] == 0 and final_throttle <= 5:
-            state['arm_state'] = 255
+        if state['arm_state'] == 0 and not state['arm_pending']:
             if state['alt_hold_active']:
+                state['arm_state'] = 255
                 snap = get_alt_snapshot()
                 if snap >= 0:
                     pid_logger.start(snap)
+            else:
+                state['arm_pending']   = True
+                state['arm_pending_t'] = time.time()
+                state['base_throttle'] = 0
+                print("\n⏳ 解鎖中...")
         else:
             if state['alt_hold_active']:
                 pid_logger.stop()
-            state['arm_state'] = 0
+            state['arm_pending']   = False
+            state['arm_state']     = 0
+            state['base_throttle'] = 90
     state['prev_r'] = curr_r
 
     if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -502,6 +561,9 @@ state = {
     'reref_pending': False,
     'prev_r': False, 'prev_h': False, 'prev_f': False,
     'syncing_throttle': False,  # 退出定高後等 T: 同步完成前凍結手動油門
+    'syncing_throttle_t': 0.0,  # syncing 開始時間，逾時自動解除
+    'arm_pending': False,        # 解鎖序列：先送 0 油門讓 Betaflight 接受，再跳 60
+    'arm_pending_t': 0.0,
 }
 
 channels = {'throttle': 0, 'alt_byte': 128, 'vel_cmd': 0,
