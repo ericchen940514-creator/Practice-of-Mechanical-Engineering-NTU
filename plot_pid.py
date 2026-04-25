@@ -34,7 +34,7 @@ print(f"📂 共找到 {len(files)} 筆紀錄")
 
 # ── 讀取單一 CSV ──
 def load_csv(fpath):
-    times, cur_alt, tgt_alt, pid_255 = [], [], [], []
+    times, cur_alt, tgt_alt, pid_255, vel_cmd = [], [], [], [], []
     pid_params = '不詳'
     with open(fpath, newline='', encoding='utf-8') as f:
         content = f.read()
@@ -51,9 +51,10 @@ def load_csv(fpath):
             cur_alt.append(float(row['current_alt_cm']))
             tgt_alt.append(float(row['target_alt_cm']))
             pid_255.append(float(row['pid_thr_0_255']) if row['pid_thr_0_255'] else None)
+            vel_cmd.append(float(row['vel_cmd_cm_s']) if row.get('vel_cmd_cm_s') else 0.0)
         except (ValueError, KeyError):
             pass
-    return times, cur_alt, tgt_alt, pid_255, pid_params
+    return times, cur_alt, tgt_alt, pid_255, vel_cmd, pid_params
 
 # ── 繪圖狀態 ──
 idx = [len(files) - 1]  # 預設顯示最新一筆
@@ -69,7 +70,7 @@ btn_next = Button(ax_next, '下一筆 ▶')
 
 def draw(i):
     fpath = files[i]
-    times, cur_alt, tgt_alt, pid_255, pid_params = load_csv(fpath)
+    times, cur_alt, tgt_alt, pid_255, vel_cmd, pid_params = load_csv(fpath)
     is_velmode = os.path.basename(fpath).startswith('velmode_')
 
     if not times:
@@ -114,12 +115,23 @@ def draw(i):
     valid_t   = [t for t, p in zip(times, pid_255) if p is not None]
     valid_pid = [p for p in pid_255 if p is not None]
     ax2.plot(valid_t, valid_pid, color='#4CAF50', linewidth=1.5, label='PID 油門 (0~255)')
-    ax2.set_ylabel('油門')
+    ax2.set_ylabel('PID 油門 (0~255)', color='#4CAF50')
     ax2.set_xlabel('時間 (s)')
-    ax2.legend(loc='upper right', fontsize=9)
     ax2.yaxis.set_minor_locator(ticker.AutoMinorLocator())
     ax2.grid(True, which='major', linestyle='-', alpha=0.3)
     ax2.grid(True, which='minor', linestyle=':', alpha=0.2)
+
+    if is_velmode and vel_cmd:
+        ax2r = ax2.twinx()
+        ax2r.plot(times, vel_cmd, color='#FF9800', linewidth=1.5, linestyle='--', label='速度命令 (cm/s)')
+        ax2r.axhline(0, color='#FF9800', linewidth=0.8, linestyle=':')
+        ax2r.set_ylabel('速度命令 (cm/s)', color='#FF9800')
+        ax2r.tick_params(axis='y', labelcolor='#FF9800')
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2r.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=9)
+    else:
+        ax2.legend(loc='upper right', fontsize=9)
 
     # 更新按鈕狀態提示
     btn_prev.label.set_text(f'◀ 上一筆' if i > 0 else '（已是第一筆）')
