@@ -11,19 +11,19 @@
 ## 系統架構
 
 ```
-[PS 手把] --藍牙--> [電腦 main_althold_v2.py] --藍牙(COM4)--> [Arduino] --IBUS--> [飛控 F405]
-                                               <--高度/PID回傳--
-                                                                |
-                                                                +--PWM--> [夾爪伺服馬達 D6]
-                                                                |
-                                                                +--I2C--> [VL53L0X 測距感測器]
+[PS 手把] --藍牙--> [電腦 main_althold_v3_velmode.py] --藍牙(COM4)--> [Arduino] --IBUS--> [飛控 F405]
+                                                       <--高度/PID回傳--
+                                                                        |
+                                                                        +--PWM--> [夾爪伺服馬達 D6]
+                                                                        |
+                                                                        +--I2C--> [VL53L0X 測距感測器]
 ```
 
 | 元件 | 說明 |
 |------|------|
 | PS 手把 | 透過藍牙與電腦配對，作為輸入裝置 |
-| 電腦 (`main_althold_v2.py`) | 讀取手把輸入，打包成 10-byte 封包透過藍牙傳給 Arduino；接收高度回傳 |
-| Arduino (`sketch_althold_v3.ino`) | 接收指令，轉換 IBUS 送給飛控；執行定高 PID；回傳高度與 PID 數據 |
+| 電腦 (`main_althold_v3_velmode.py`) | 讀取手把輸入，計算速度命令，打包成 10-byte 封包透過藍牙傳給 Arduino；接收高度回傳 |
+| Arduino (`sketch_althold_v6_velmode.ino`) | 接收指令，轉換 IBUS 送給飛控；執行速度 PID 定高；回傳高度與 PID 數據 |
 | VL53L0X | 雷射測距感測器，提供即時高度資料給 Arduino PID 控制器 |
 | 飛控 F405 | 接收 IBUS 訊號控制四軸馬達飛行 |
 
@@ -46,7 +46,7 @@
 pip install pygame pyserial keyboard
 ```
 
-將 `sketch_althold_v3.ino` 燒錄到 Arduino（需先安裝 **VL53L0X by Pololu** 函式庫）。
+將 `sketch_althold_v6_velmode.ino` 燒錄到 Arduino（需先安裝 **VL53L0X by Pololu** 函式庫）。
 
 ---
 
@@ -55,10 +55,10 @@ pip install pygame pyserial keyboard
 COM 埠可用 `--port` 參數指定（預設 COM4）：
 
 ```bash
-python main_althold_v2.py --port COM6
+python main_althold_v3_velmode.py --port COM6
 ```
 
-或修改 `main_althold_v2.py` 最上方的預設值：
+或修改 `main_althold_v3_velmode.py` 最上方的預設值：
 
 ```python
 parser.add_argument('--port', default='COM4', ...)
@@ -71,7 +71,7 @@ parser.add_argument('--port', default='COM4', ...)
 ## 啟動方式
 
 ```bash
-python main_althold_v2.py
+python main_althold_v3_velmode.py
 ```
 
 程式啟動時**自動偵測手把**：
@@ -95,26 +95,27 @@ python main_althold_v2.py
 
 ### 飛行控制（手把按鍵）
 
-| 按鍵 | 手動模式 | 定高模式 |
-|------|----------|----------|
-| 方向鍵 上 / 下 | 基準油門 ± 步進 | 目標高度 ± 大步進 |
-| 方向鍵 左 / 右 | 步進量 縮小/增大 | 目標高度 ±3 cm |
+| 按鍵 | 手動模式 | 速度定高模式 |
+|------|----------|-------------|
+| 方向鍵 上 / 下 | 基準油門 ± 步進 | （無效）|
+| 方向鍵 左 / 右 | 步進量 縮小/增大 | （無效）|
 | **○（Circle）** | 切換定高（開啟）| 切換定高（關閉）|
-| **□（Square）** | 搖桿校準歸零 | — |
+| **□（Square）** | 搖桿校準歸零 | 積分重設（重新收斂懸停油門）|
 | **△（Triangle）** | **解鎖 / 上鎖** | **解鎖 / 上鎖** |
 | **Options** 長按 3 秒 | 安全關閉程式 | 安全關閉程式 |
 | **4 + 6 同時按** | 🚨 緊急停機 | 🚨 緊急停機 |
 
 ### 飛行控制（鍵盤）
 
-| 按鍵 | 手動模式 | 定高模式 |
-|------|----------|----------|
-| `W` / `S` | 油門增減 | — |
+| 按鍵 | 手動模式 | 速度定高模式 |
+|------|----------|-------------|
+| `W` / `S` | 油門增減 | 爬升 / 下降速率 |
 | `A` / `D` | 偏航 | 偏航 |
 | `↑` / `↓` | 俯仰 | 俯仰 |
 | `←` / `→` | 翻滾 | 翻滾 |
-| `Tab` / `Shift` | 基準油門 上/下 | 目標高度 上/下 |
+| `Tab` / `Shift` | 基準油門 上/下 | （無效）|
 | `C` / `Z` | 步進量 增大/縮小 | — |
+| `F` | — | 積分重設 |
 | `H` | 切換定高（開啟）| 切換定高（關閉）|
 | `R` | 解鎖 / 上鎖 | 解鎖 / 上鎖 |
 | `X` 長按 3 秒 | 安全退出 | 安全退出 |
@@ -151,13 +152,13 @@ python main_althold_v2.py
 
 1. 確認 Arduino 已上電並與電腦藍牙配對
 2. PS 手把透過藍牙與電腦配對
-3. 執行 `python main_althold_v2.py`
+3. 執行 `python main_althold_v3_velmode.py`
 4. 等待終端機顯示連線成功
-5. **搖桿置中**，按下 **□**（或等待初始化）進行校準
+5. **搖桿置中**，按下 **□** 進行搖桿校準（可選）
 6. 確認油門歸零後，按 **△**（或 `R`）解鎖
-7. 慢慢推油門起飛
-8. 到達目標高度後，按 **○**（或 `H`）開啟定高
-9. 關閉定高後降落，油門歸零後按 **△** 上鎖
+7. 慢慢推油門起飛至穩定懸停高度
+8. 按 **○**（或 `H`）切入速度模式定高；左搖桿置中 = 懸停，推上/下 = 爬升/下降
+9. 按 **○** 退出定高，手動降落後油門歸零按 **△** 上鎖
 10. 長按 **Options 3 秒**（或 `X`）安全關閉程式
 
 > ⚠️ **安全提醒**：解鎖前油門值必須 ≤ 5，否則無法解鎖。  
@@ -173,7 +174,7 @@ python main_althold_v2.py
 python tests/test_joy.py
 ```
 
-按下手把按鍵後終端機會顯示對應編號，再填入 `main_althold_v2.py` 的按鍵定義區。
+按下手把按鍵後終端機會顯示對應編號，再填入 `main_althold_v3_velmode.py` 的按鍵定義區。
 
 ### 測試藍牙通訊
 
@@ -196,25 +197,26 @@ python tests/test_ibus.py
 
 ## 進階參數調整
 
-開啟 `main_althold_v2.py` 最上方：
+開啟 `main_althold_v3_velmode.py` 最上方：
 
 ```python
-JOYSTICK_SENSITIVITY = 60   # 搖桿推滿時的額外油門推力
-TILT_SENS  = 0.3            # 俯仰 / 翻滾靈敏度（0.0 ~ 1.0）
-YAW_SENS   = 0.25           # 偏航旋轉靈敏度（0.0 ~ 1.0）
-STEP_SPEED = 5              # 夾爪開合速度
-ALT_STEP_DEFAULT = 10       # 定高模式預設高度步進量（cm）
-ALT_MAX_CM = 120            # 最大允許目標高度（cm）
+JOYSTICK_SENSITIVITY = 60   # 手動模式搖桿推滿時的額外油門推力
+TILT_SENS    = 0.3          # 俯仰 / 翻滾靈敏度（0.0 ~ 1.0）
+YAW_SENS     = 0.25         # 偏航旋轉靈敏度（0.0 ~ 1.0）
+STEP_SPEED   = 5            # 夾爪開合速度
+ALT_VEL_SCALE = 60          # 速度模式搖桿全推對應最大速率（cm/s）
+ALT_MAX_CM   = 300          # 高度上限（cm，超過時 Arduino 強制往下）
 ```
 
-PID 係數在 `sketch_althold_v3.ino`：
+PID 係數在 `sketch_althold_v6_velmode.ino`：
 
 ```cpp
-const float Kp    = 2.5;
-const float Ki    = 0.5;
-const float Kd    = 3.5;
-const float ALPHA = 0.15;  // 感測器 EMA 濾波
-const float BETA  = 0.2;   // D 項低通濾波
+const float Kp_vel           = 0.80f;
+const float Ki_vel           = 1.20f;
+const float Kd_vel           = 0.0f;
+const float MAX_ALT_CM       = 300.0f;  // 超過此高度強制 vel_cmd ≤ −5 cm/s
+const float ALPHA            = 0.35f;   // 感測器 EMA 濾波
+const float GAMMA            = 0.20f;   // 速度估計 EMA
 ```
 
 ---
@@ -258,14 +260,15 @@ const float BETA  = 0.2;   // D 項低通濾波
 
 | 檔案 | 說明 |
 |------|------|
-| `main_althold_v2.py` | 主控制程式（手把 / 鍵盤自動切換，含定高）|
-| `pid_logger.py` | 定高 PID 數據記錄模組（可選）|
+| `main_althold_v3_velmode.py` | 主控制程式（手把 / 鍵盤自動切換，速度模式定高）|
+| `pid_logger.py` | PID 數據記錄模組（可選，記錄至 `vel_logs/`）|
 | `plot_pid.py` | PID 數據視覺化工具 |
-| `sketch_althold_v3/sketch_althold_v3.ino` | Arduino 韌體（IBUS 轉換 + 定高 PID + 高度回傳）|
+| `sketch_althold_v6_velmode/sketch_althold_v6_velmode.ino` | Arduino 韌體（IBUS 轉換 + 速度 PID + 高度回傳）|
 | `tests/test_bt.py` | 藍牙通訊測試工具 |
 | `tests/test_joy.py` | 手把按鍵編號測試工具 |
 | `tests/test_ibus.py` | IBUS 封包監看工具（debug 用）|
-| `pid_logs/` | 定高飛行 PID 數據記錄（CSV，自動產生）|
+| `vel_logs/` | 速度模式 PID 數據記錄（CSV，自動產生）|
 | `SETUP_GUIDE.md` | 從零開始的完整組裝與設定指南 |
-| `ALTHOLD_GUIDE.md` | 定高功能說明與 PID 調參指南 |
-| `archive/` | 舊版程式備份（controller.py、keyboard_controller.py、main.py、sketch_mar26a）|
+| `PID_TUNING.md` | 速度模式 PID 調參說明與診斷指南 |
+| `velmode_guide.md` | 速度模式操作指南與架構說明 |
+| `archive/` | 舊版程式備份（含舊定高 v2/v3/v5 韌體）|

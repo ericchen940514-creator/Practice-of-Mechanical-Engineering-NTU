@@ -41,7 +41,7 @@ THROTTLE_EXPO = 0.75
 TILT_EXPO     = 0.50
 YAW_EXPO      = 0.50
 
-ALT_MAX_CM    = 90
+ALT_MAX_CM    = 300
 ALT_VEL_SCALE = 60   # cm/s，搖桿全推對應的最大速率
 
 # ── 手把按鍵 ──

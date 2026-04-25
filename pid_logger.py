@@ -19,19 +19,19 @@ _prefix    = 'althold'
 def _read_pid_from_ino() -> str:
     """從 Arduino sketch 讀取 Kp/Ki/Kd，回傳格式化字串。"""
     ino_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'sketch_althold_v3', 'sketch_althold_v3.ino')
+                            'sketch_althold_v6_velmode', 'sketch_althold_v6_velmode.ino')
     params = {}
     try:
         with open(ino_path, encoding='utf-8') as f:
             for line in f:
-                for p in ('Kp', 'Ki', 'Kd'):
+                for p in ('Kp_vel', 'Ki_vel', 'Kd_vel'):
                     m = re.search(rf'const float {p}\s*=\s*([\d.]+)', line)
                     if m:
                         params[p] = m.group(1)
     except Exception:
         pass
     if params:
-        return f"Kp={params.get('Kp','?')} Ki={params.get('Ki','?')} Kd={params.get('Kd','?')}"
+        return f"Kp={params.get('Kp_vel','?')} Ki={params.get('Ki_vel','?')} Kd={params.get('Kd_vel','?')}"
     return "Kp=? Ki=? Kd=?"
 
 

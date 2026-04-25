@@ -55,7 +55,7 @@ const float MAX_THR_OFFSET    = 220.0f;
 const float ALPHA             = 0.35f;
 const float GAMMA             = 0.20f;
 
-const float MAX_ALT_CM            = 120.0f;
+const float MAX_ALT_CM            = 300.0f;
 const int   MAX_THR_STEP          = 20;
 
 void sendIBUS() {
