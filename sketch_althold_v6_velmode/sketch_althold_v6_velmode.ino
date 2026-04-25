@@ -207,7 +207,9 @@ void loop() {
           }
 
         } else if (ah_val == 2 && alt_hold_active) {
-          // 積分重設（相當於讓懸停油門重新收斂）
+          // 積分重設：先把當前實際油門吸收進 hover_estimate，
+          // 避免清積分後油門瞬間跳回舊基準造成失速
+          hover_estimate   = ibus_channels[2];
           integral_vel     = 0;
           last_vel_error   = 0;
           v_est            = 0;

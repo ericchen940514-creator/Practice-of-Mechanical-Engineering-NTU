@@ -96,6 +96,20 @@ def safe_disconnect(ser, gripper_val=127):
     except Exception:
         pass
 
+def do_emergency_lock(ser, state_dict):
+    """所有緊急路徑共用：更新 Python 狀態、停止記錄、送 5 次上鎖封包。"""
+    state_dict['arm_state']       = 0
+    state_dict['alt_hold_active'] = False
+    pid_logger.stop()
+    if ser is not None and ser.is_open:
+        lock_pkt = make_packet(0, 127, 127, 127, 128, state_dict['gripper_val'], 0, 0)
+        for _ in range(5):
+            try:
+                ser.write(lock_pkt)
+                time.sleep(0.01)
+            except Exception:
+                pass
+
 def apply_dead_zone(value):
     return 0.0 if abs(value) < DEAD_ZONE else value
 
@@ -654,20 +668,25 @@ try:
                 channels, should_exit, estop = read_gamepad(joystick, state)
             except pygame.error as e:
                 print(f"\n⚠️ 手把讀取失敗（{e}），安全退出...")
-                should_exit, estop = True, False
+                with _serial_lock:
+                    _bt_pe = bt_serial
+                do_emergency_lock(_bt_pe, state)
+                should_exit = True
                 channels = {'throttle': 0, 'alt_byte': 128, 'vel_cmd': 0,
                             'yaw': 127, 'pitch': 127, 'roll': 127, 'ah_val': 0}
             if estop:
                 print("\n🚨 [緊急停機]！")
-                if bt_serial and bt_serial.is_open:
-                    estop_pkt = make_packet(0, 127, 127, 127, 128, state['gripper_val'], 0, 0)
-                    for _ in range(5):
-                        send_packet(bt_serial, estop_pkt)
+                with _serial_lock:
+                    _bt_es = bt_serial
+                do_emergency_lock(_bt_es, state)
                 raise KeyboardInterrupt
         else:
             channels, should_exit = read_keyboard(state)
 
         if should_exit:
+            with _serial_lock:
+                _bt_exit = bt_serial
+            do_emergency_lock(_bt_exit, state)
             break
 
         # 積分重設：送 ah_val=2
@@ -708,6 +727,7 @@ try:
                     bt_serial = None
                 state['arm_state']       = 0
                 state['alt_hold_active'] = False
+                pid_logger.stop()
                 reconnect_cooldown = time.time() + 3.0
 
         now = time.time()
