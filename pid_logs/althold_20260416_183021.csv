@@ -1,0 +1,4 @@
+time_s,current_alt_cm,target_alt_cm,pid_thr_ibus,pid_thr_0_255
+0.191,5.6,6,1278,70
+0.399,5.6,6,1100,25
+0.617,5.6,6,1100,25

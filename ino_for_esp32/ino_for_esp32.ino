@@ -54,7 +54,6 @@ unsigned long last_pid_time = 0;
 // -------------------- Sensor State --------------------
 bool  sensor_ok          = false;
 float filtered_mm        = -1.0f;
-float prev_filtered_mm   = -1.0f;
 bool  filter_inited      = false;
 unsigned long last_sensor_time   = 0;
 unsigned long last_valid_range_time = 0;
@@ -74,7 +73,7 @@ const float ALPHA            = 0.35f;
 const float GAMMA            = 0.20f;
 
 // Altitude / control limits
-const float MAX_ALT_CM       = 130.0f;   // Effective control ceiling
+const float MAX_ALT_CM       = 300.0f;   // Effective control ceiling
 const int   MAX_THR_STEP     = 20;
 
 // Failsafe timing
@@ -144,15 +143,16 @@ void updateAltHold(float filt_mm) {
 
   // Failsafe: sensor data stale
   if (!sensorFreshEnough()) {
-    if (alt_hold_active) {
-      int fallback_thr = manual_throttle;
-      alt_hold_active = false;
-      ibus_channels[2] = fallback_thr;
-      manual_throttle = fallback_thr;
-      resetAltHoldController();
-      SerialBT.print("F:2\n");
-      Serial.println("Alt Hold disabled: sensor data stale");
-    }
+    int fallback_thr = manual_throttle;
+    alt_hold_active = false;
+    ibus_channels[2] = fallback_thr;
+    manual_throttle = fallback_thr;
+    resetAltHoldController();
+    SerialBT.print("F:2\n");
+    char tbuf[16];
+    snprintf(tbuf, sizeof(tbuf), "T:%d\n", fallback_thr);
+    SerialBT.print(tbuf);
+    Serial.println("Alt Hold disabled: sensor data stale");
     return;
   }
 
@@ -160,9 +160,9 @@ void updateAltHold(float filt_mm) {
 
   float current_cm = filt_mm / 10.0f;
 
-  // Out-of-range protection for this controller
+  float safe_vel_cmd = received_vel_cmd;
   if (current_cm > MAX_ALT_CM) {
-    received_vel_cmd = min(received_vel_cmd, -5.0f);
+    safe_vel_cmd = min(safe_vel_cmd, -5.0f);
   }
 
   if (prev_cm_raw > 0.0f && fabs(current_cm - prev_cm_raw) > 15.0f) {
@@ -179,7 +179,7 @@ void updateAltHold(float filt_mm) {
   v_est = GAMMA * v_raw + (1.0f - GAMMA) * v_est;
   prev_cm_filt = current_cm;
 
-  float vel_error = received_vel_cmd - v_est;
+  float vel_error = safe_vel_cmd - v_est;
   float d_vel = (vel_error - last_vel_error) / dt;
   last_vel_error = vel_error;
 
@@ -360,7 +360,6 @@ void loop() {
         filtered_mm   = new_filt;
         filter_inited = true;
       } else if (!skip_ema) {
-        prev_filtered_mm = filtered_mm;
         filtered_mm = ALPHA * new_filt + (1.0f - ALPHA) * filtered_mm;
       }
     }

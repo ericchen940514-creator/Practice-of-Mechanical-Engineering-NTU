@@ -25,7 +25,7 @@ __version__ = "0.5.0 (Velocity Mode)"
 # 啟動參數
 # ==========================================
 parser = argparse.ArgumentParser(description='無人機地面控制站（速度模式定高）')
-parser.add_argument('--port', default='COM4', help='藍牙 COM 埠（預設: COM4）')
+parser.add_argument('--port', default='COM13', help='藍牙 COM 埠（預設: COM13）')
 args = parser.parse_args()
 
 COM_PORT  = args.port
@@ -629,6 +629,15 @@ def _serial_reader():
                     state['base_throttle']    = new_base
                     state['syncing_throttle'] = False
                 print(f"\n✅ 基準油門已同步：{new_base}")
+            elif line.startswith('F:2'):
+                # ESP32 強制退出定高（感測器逾時），Python 端同步關閉
+                with _state_lock:
+                    if state['alt_hold_active']:
+                        state['alt_hold_active']    = False
+                        state['syncing_throttle']   = True
+                        state['syncing_throttle_t'] = time.time()
+                pid_logger.stop()
+                print("\n⚠️ 感測器逾時，定高已被 ESP32 強制關閉！")
         except (ValueError, UnicodeDecodeError):
             pass
         except Exception:

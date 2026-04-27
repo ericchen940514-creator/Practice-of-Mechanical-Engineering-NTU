@@ -1,0 +1,4 @@
+# Kp=? Ki=? Kd=?
+time_s,current_alt_cm,target_alt_cm,vel_cmd_cm_s,pid_thr_ibus,pid_thr_0_255
+0.097,11.6,0,-60.0,1423,107
+0.273,11.6,0,-43.53,1407,103

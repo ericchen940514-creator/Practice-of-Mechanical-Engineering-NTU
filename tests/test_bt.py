@@ -6,8 +6,8 @@ import threading
 # 藍牙收訊確認工具（不需要手把）
 # 送封包給 Arduino，同時從 USB 線確認 Arduino 有沒有收到
 # ==========================================
-BT_PORT  = 'COM4'   # ← 藍牙傳出 COM 埠（裝置管理員查）
-USB_PORT = 'COM3'   # ← Arduino USB COM 埠
+BT_PORT  = 'COM13'   # ← 藍牙傳出 COM 埠（裝置管理員查）
+USB_PORT = 'COM10'   # ← Arduino USB COM 埠
 
 print(f"連線藍牙 {BT_PORT}...")
 try:
