@@ -77,6 +77,9 @@ def draw(i):
         fig.suptitle(f'❌ 無有效資料 — {os.path.basename(fpath)}', fontsize=13)
         return
 
+    for ax in fig.axes:
+        if ax not in (ax1, ax2, ax_prev, ax_next):
+            ax.remove()
     ax1.cla()
     ax2.cla()
 
