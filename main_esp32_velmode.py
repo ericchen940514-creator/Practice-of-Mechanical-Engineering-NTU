@@ -48,6 +48,9 @@ parser.add_argument('--live-flow', action='store_true',
                     help='開啟光流訊號即時繪圖視窗')
 args = parser.parse_args()
 
+if args.live_flow:
+    flow_live.start()
+
 COM_PORT  = args.port
 BAUD_RATE = 9600
 
