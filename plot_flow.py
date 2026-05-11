@@ -68,7 +68,8 @@ def build_path(dx_list, dy_list, alt_list):
     return x_cm, y_cm
 
 # ── 繪圖狀態 ──
-idx = [len(files) - 1]
+idx  = [len(files) - 1]
+cbar_ref = [None]  # 持有上一次的 colorbar，重畫時先移除避免堆疊
 
 fig = plt.figure(figsize=(13, 8))
 fig.subplots_adjust(bottom=0.13, left=0.07, right=0.97, top=0.91, wspace=0.35)
@@ -85,6 +86,13 @@ btn_next = Button(ax_next, '下一筆 ▶')
 def draw(i):
     fpath = files[i]
     times, dx_list, dy_list, alt_list = load_csv(fpath)
+
+    if cbar_ref[0] is not None:
+        try:
+            cbar_ref[0].remove()
+        except Exception:
+            pass
+        cbar_ref[0] = None
 
     ax_path.cla()
     ax_alt.cla()
@@ -129,6 +137,7 @@ def draw(i):
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax_path, fraction=0.046, pad=0.04)
     cbar.set_label('時間 (s)', fontsize=8)
+    cbar_ref[0] = cbar
 
     # ── 右上：高度 vs 時間 ──
     valid_t   = [t for t, a in zip(times, alt_list) if a > 0]
