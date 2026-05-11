@@ -29,6 +29,14 @@ except ImportError:
         stop      = staticmethod(lambda *_: None)
         record    = staticmethod(lambda *_: None)
 
+try:
+    import flow_live
+except ImportError:
+    class flow_live:
+        start  = staticmethod(lambda *_: None)
+        stop   = staticmethod(lambda *_: None)
+        record = staticmethod(lambda *_: None)
+
 __version__ = "0.5.0 (Velocity Mode)"
 
 # ==========================================
@@ -36,6 +44,8 @@ __version__ = "0.5.0 (Velocity Mode)"
 # ==========================================
 parser = argparse.ArgumentParser(description='無人機地面控制站（速度模式定高）')
 parser.add_argument('--port', default='COM5', help='藍牙 COM 埠（預設: COM5）')
+parser.add_argument('--live-flow', action='store_true',
+                    help='開啟光流訊號即時繪圖視窗')
 args = parser.parse_args()
 
 COM_PORT  = args.port
@@ -112,6 +122,7 @@ def do_emergency_lock(ser, state_dict):
     state_dict['alt_hold_active'] = False
     pid_logger.stop()
     flow_logger.stop()
+    flow_live.stop()
     if ser is not None and ser.is_open:
         lock_pkt = make_packet(0, 127, 127, 127, 128, state_dict['gripper_val'], 0, 0)
         for _ in range(5):
@@ -329,6 +340,8 @@ def read_gamepad(joystick, state):
             state['arm_state']      = 255
             state['base_throttle']  = 60
             flow_logger.start()
+            if args.live_flow:
+                flow_live.start()
             print("\n✅ 解鎖！")
 
     if state['alt_hold_active']:
@@ -359,6 +372,8 @@ def read_gamepad(joystick, state):
                 if snap >= 0:
                     pid_logger.start(snap)
                 flow_logger.start()
+                if args.live_flow:
+                    flow_live.start()
             else:
                 state['arm_pending']   = True
                 state['arm_pending_t'] = time.time()
@@ -368,6 +383,7 @@ def read_gamepad(joystick, state):
             if state['alt_hold_active']:
                 pid_logger.stop()
             flow_logger.stop()
+            flow_live.stop()
             state['arm_pending']   = False
             state['arm_state']     = 0
             state['base_throttle'] = 90
@@ -480,6 +496,8 @@ def read_keyboard(state):
                 if snap >= 0:
                     pid_logger.start(snap)
                 flow_logger.start()
+                if args.live_flow:
+                    flow_live.start()
             else:
                 state['arm_pending']   = True
                 state['arm_pending_t'] = time.time()
@@ -489,6 +507,7 @@ def read_keyboard(state):
             if state['alt_hold_active']:
                 pid_logger.stop()
             flow_logger.stop()
+            flow_live.stop()
             state['arm_pending']   = False
             state['arm_state']     = 0
             state['base_throttle'] = 90
@@ -641,6 +660,7 @@ def _handle_bt_line(line):
                 with _alt_lock:
                     cur_alt_mm = _current_alt * 10.0
                 flow_logger.record(dx, dy, cur_alt_mm)
+                flow_live.record(dx, dy, cur_alt_mm)
         elif line.startswith('P:'):
             _pid_throttle = int(line[2:])
         elif line.startswith('T:'):
@@ -820,6 +840,7 @@ except pygame.error as e:
 finally:
     pid_logger.stop()
     flow_logger.stop()
+    flow_live.stop()
     print("\n🔌 正在關閉連線...")
     if bt_serial is not None and bt_serial.is_open:
         safe_disconnect(bt_serial)
