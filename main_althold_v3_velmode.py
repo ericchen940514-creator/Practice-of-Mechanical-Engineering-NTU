@@ -224,18 +224,20 @@ def read_gamepad(joystick, state):
     # ○：切換定高
     curr_circle = joystick.get_button(BTN_CIRCLE)
     if curr_circle and not state['prev_circle']:
-        state['alt_hold_active'] = not state['alt_hold_active']
-        if state['alt_hold_active']:
-            snap = get_alt_snapshot()
-            if snap >= 0:
-                if state['arm_state'] == 255:
-                    pid_logger.start(snap)
-                print(f"\n🔒 速度模式啟動！當前高度：{snap:.1f} cm")
-                print(" 左搖桿死區=懸停(vel=0)，推上/下=爬升/下降速率")
+        if not state['alt_hold_active']:
+            if state['arm_state'] != 255:
+                print("\n⚠️ 未解鎖，無法啟動定高。")
             else:
-                state['alt_hold_active'] = False
-                print("\n⚠️ 感測器尚無資料，無法切入。")
+                snap = get_alt_snapshot()
+                if snap >= 0:
+                    state['alt_hold_active'] = True
+                    pid_logger.start(snap)
+                    print(f"\n🔒 速度模式啟動！當前高度：{snap:.1f} cm")
+                    print(" 左搖桿死區=懸停(vel=0)，推上/下=爬升/下降速率")
+                else:
+                    print("\n⚠️ 感測器尚無資料，無法切入。")
         else:
+            state['alt_hold_active'] = False
             pid_logger.stop()
             state['syncing_throttle']   = True
             state['syncing_throttle_t'] = time.time()
@@ -389,18 +391,20 @@ def read_keyboard(state):
     # H：切換定高
     curr_h = kb.is_pressed('h')
     if curr_h and not state['prev_h']:
-        state['alt_hold_active'] = not state['alt_hold_active']
-        if state['alt_hold_active']:
-            snap = get_alt_snapshot()
-            if snap >= 0:
-                state['last_alt_update_t'] = time.time()
-                if state['arm_state'] == 255:
-                    pid_logger.start(snap)
-                print(f"\n🔒 速度模式定高啟動！當前高度：{snap:.1f} cm")
+        if not state['alt_hold_active']:
+            if state['arm_state'] != 255:
+                print("\n⚠️ 未解鎖，無法啟動定高。")
             else:
-                state['alt_hold_active'] = False
-                print("\n⚠️ 感測器尚無資料，無法切入定高。")
+                snap = get_alt_snapshot()
+                if snap >= 0:
+                    state['alt_hold_active'] = True
+                    state['last_alt_update_t'] = time.time()
+                    pid_logger.start(snap)
+                    print(f"\n🔒 速度模式定高啟動！當前高度：{snap:.1f} cm")
+                else:
+                    print("\n⚠️ 感測器尚無資料，無法切入定高。")
         else:
+            state['alt_hold_active'] = False
             pid_logger.stop()
             state['syncing_throttle']   = True
             state['syncing_throttle_t'] = time.time()
