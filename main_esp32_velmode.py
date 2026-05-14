@@ -29,13 +29,10 @@ except ImportError:
         stop      = staticmethod(lambda *_: None)
         record    = staticmethod(lambda *_: None)
 
-try:
-    import flow_live
-except ImportError:
-    class flow_live:
-        start  = staticmethod(lambda *_: None)
-        stop   = staticmethod(lambda *_: None)
-        record = staticmethod(lambda *_: None)
+import math
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 __version__ = "0.5.0 (Velocity Mode)"
 
@@ -44,12 +41,7 @@ __version__ = "0.5.0 (Velocity Mode)"
 # ==========================================
 parser = argparse.ArgumentParser(description='無人機地面控制站（速度模式定高）')
 parser.add_argument('--port', default='COM5', help='藍牙 COM 埠（預設: COM5）')
-parser.add_argument('--live-flow', action='store_true',
-                    help='開啟光流訊號即時繪圖視窗')
 args = parser.parse_args()
-
-if args.live_flow:
-    flow_live.start()
 
 COM_PORT  = args.port
 BAUD_RATE = 9600
@@ -125,7 +117,7 @@ def do_emergency_lock(ser, state_dict):
     state_dict['alt_hold_active'] = False
     pid_logger.stop()
     flow_logger.stop()
-    flow_live.stop()
+    _flow_display.stop()
     if ser is not None and ser.is_open:
         lock_pkt = make_packet(0, 127, 127, 127, 128, state_dict['gripper_val'], 0, 0)
         for _ in range(5):
@@ -343,8 +335,7 @@ def read_gamepad(joystick, state):
             state['arm_state']      = 255
             state['base_throttle']  = 60
             flow_logger.start()
-            if args.live_flow:
-                flow_live.start()
+            _flow_display.start()
             print("\n✅ 解鎖！")
 
     if state['alt_hold_active']:
@@ -375,8 +366,7 @@ def read_gamepad(joystick, state):
                 if snap >= 0:
                     pid_logger.start(snap)
                 flow_logger.start()
-                if args.live_flow:
-                    flow_live.start()
+                _flow_display.start()
             else:
                 state['arm_pending']   = True
                 state['arm_pending_t'] = time.time()
@@ -386,7 +376,7 @@ def read_gamepad(joystick, state):
             if state['alt_hold_active']:
                 pid_logger.stop()
             flow_logger.stop()
-            flow_live.stop()
+            _flow_display.stop()
             state['arm_pending']   = False
             state['arm_state']     = 0
             state['base_throttle'] = 90
@@ -499,8 +489,7 @@ def read_keyboard(state):
                 if snap >= 0:
                     pid_logger.start(snap)
                 flow_logger.start()
-                if args.live_flow:
-                    flow_live.start()
+                _flow_display.start()
             else:
                 state['arm_pending']   = True
                 state['arm_pending_t'] = time.time()
@@ -510,7 +499,7 @@ def read_keyboard(state):
             if state['alt_hold_active']:
                 pid_logger.stop()
             flow_logger.stop()
-            flow_live.stop()
+            _flow_display.stop()
             state['arm_pending']   = False
             state['arm_state']     = 0
             state['base_throttle'] = 90
@@ -532,10 +521,183 @@ def read_keyboard(state):
     return channels, should_exit
 
 # ==========================================
-# pygame 狀態顯示
+# 版面常數
 # ==========================================
-def draw_status(screen, font, state, mode, channels, connected):
-    screen.fill((20, 20, 20))
+STATUS_W = 370   # 左側狀態面板寬度
+CHART_W  = 910   # 右側圖表區域寬度
+WIN_H    = 720   # 視窗高度
+
+# ==========================================
+# 嵌入式光流即時顯示（Agg → pygame surface）
+# ==========================================
+class EmbeddedFlowDisplay:
+    WINDOW_S        = 10.0
+    PATH_MAX_PTS    = 2000
+    COUNTS_TO_RAD   = 0.01
+    RENDER_INTERVAL = 0.05  # 20 Hz
+
+    def __init__(self, width: int, height: int):
+        plt.rcParams['font.family']        = ['Microsoft JhengHei', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        dpi = 100
+        self.fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi,
+                              facecolor='#141414')
+        self.fig.subplots_adjust(left=0.10, right=0.97, top=0.94, bottom=0.08,
+                                 hspace=0.52, wspace=0.38)
+        ax_dxy  = self.fig.add_subplot(2, 2, 1)
+        ax_mag  = self.fig.add_subplot(2, 2, 2)
+        ax_alt  = self.fig.add_subplot(2, 2, 3)
+        ax_path = self.fig.add_subplot(2, 2, 4)
+
+        for ax in (ax_dxy, ax_mag, ax_alt, ax_path):
+            ax.set_facecolor('#1a1a2e')
+            ax.tick_params(colors='#aaa', labelsize=8)
+            for sp in ax.spines.values():
+                sp.set_color('#444')
+            ax.title.set_color('#ddd')
+            ax.xaxis.label.set_color('#aaa')
+            ax.yaxis.label.set_color('#aaa')
+
+        self.ln_dx, = ax_dxy.plot([], [], color='#E53935', lw=1.2, label='dx')
+        self.ln_dy, = ax_dxy.plot([], [], color='#1E88E5', lw=1.2, label='dy')
+        ax_dxy.set_title('光流增量 dx / dy', fontsize=9)
+        ax_dxy.axhline(0, color='#555', lw=0.5)
+        ax_dxy.grid(True, ls=':', alpha=0.3, color='#555')
+        ax_dxy.legend(loc='upper left', fontsize=8,
+                      facecolor='#2a2a2a', labelcolor='#ccc', framealpha=0.6)
+
+        self.ln_mag, = ax_mag.plot([], [], color='#FF9800', lw=1.2)
+        ax_mag.set_title('光流量級 |flow|', fontsize=9)
+        ax_mag.set_ylabel('counts', fontsize=8)
+        ax_mag.grid(True, ls=':', alpha=0.3, color='#555')
+
+        self.ln_alt, = ax_alt.plot([], [], color='#2196F3', lw=1.4)
+        ax_alt.set_title('高度', fontsize=9)
+        ax_alt.set_xlabel('時間 (s)', fontsize=8)
+        ax_alt.set_ylabel('alt (cm)', fontsize=8)
+        ax_alt.grid(True, ls=':', alpha=0.3, color='#555')
+
+        self.ln_path,  = ax_path.plot([0], [0], color='#7B1FA2', lw=1.2)
+        self.pt_start, = ax_path.plot([0], [0], 'go', ms=7)
+        self.pt_now,   = ax_path.plot([0], [0], 'rs', ms=7)
+        ax_path.set_title('累積路徑 (cm)', fontsize=9)
+        ax_path.set_xlabel('X (cm)', fontsize=8)
+        ax_path.set_ylabel('Y (cm)', fontsize=8)
+        ax_path.set_aspect('equal', adjustable='datalim')
+        ax_path.grid(True, ls=':', alpha=0.3, color='#555')
+
+        self.ax_dxy, self.ax_mag, self.ax_alt, self.ax_path = ax_dxy, ax_mag, ax_alt, ax_path
+
+        self._lock   = threading.Lock()
+        self._ts     = deque()
+        self._dxs    = deque()
+        self._dys    = deque()
+        self._mags   = deque()
+        self._alts_t = deque()
+        self._alts   = deque()
+        self._px     = deque(maxlen=self.PATH_MAX_PTS)
+        self._py     = deque(maxlen=self.PATH_MAX_PTS)
+        self._px.append(0.0); self._py.append(0.0)
+        self._cx     = 0.0
+        self._cy     = 0.0
+        self._t0     = None
+        self._active = False
+        self._surf   = None
+        self._last_t = 0.0
+        self._render()
+
+    def start(self) -> None:
+        with self._lock:
+            self._active = True
+            self._cx = self._cy = 0.0
+            self._t0 = None
+            for q in (self._ts, self._dxs, self._dys, self._mags,
+                      self._alts_t, self._alts, self._px, self._py):
+                q.clear()
+            self._px.append(0.0); self._py.append(0.0)
+
+    def stop(self) -> None:
+        with self._lock:
+            self._active = False
+
+    def record(self, dx: int, dy: int, alt_mm: float) -> None:
+        with self._lock:
+            t = time.time()
+            if self._t0 is None:
+                self._t0 = t
+            tr = t - self._t0
+            self._ts.append(tr)
+            self._dxs.append(dx)
+            self._dys.append(dy)
+            self._mags.append(math.hypot(dx, dy))
+            alt_cm = alt_mm / 10.0 if alt_mm > 0 else None
+            sc = self.COUNTS_TO_RAD * (alt_cm if alt_cm is not None else 50.0)
+            self._cx += dx * sc
+            self._cy += dy * sc
+            self._px.append(self._cx)
+            self._py.append(self._cy)
+
+    def record_alt(self, alt_cm: float) -> None:
+        with self._lock:
+            t = time.time()
+            if self._t0 is None:
+                self._t0 = t
+            tr = t - self._t0
+            self._alts_t.append(tr)
+            self._alts.append(alt_cm)
+
+    def _render(self) -> None:
+        with self._lock:
+            if self._ts:
+                cut = self._ts[-1] - self.WINDOW_S
+                while self._ts and self._ts[0] < cut:
+                    self._ts.popleft(); self._dxs.popleft()
+                    self._dys.popleft(); self._mags.popleft()
+                while self._alts_t and self._alts_t[0] < cut:
+                    self._alts_t.popleft(); self._alts.popleft()
+            ts     = list(self._ts);     dxs    = list(self._dxs)
+            dys    = list(self._dys);    mags   = list(self._mags)
+            alts_t = list(self._alts_t); alts   = list(self._alts)
+            px     = list(self._px);     py     = list(self._py)
+
+        self.ln_dx.set_data(ts, dxs)
+        self.ln_dy.set_data(ts, dys)
+        self.ln_mag.set_data(ts, mags)
+        self.ln_alt.set_data(alts_t, alts)
+        self.ln_path.set_data(px, py)
+        if px:
+            self.pt_now.set_data([px[-1]], [py[-1]])
+
+        if ts:
+            xhi = ts[-1]; xlo = max(0.0, xhi - self.WINDOW_S)
+            for ax in (self.ax_dxy, self.ax_mag, self.ax_alt):
+                ax.set_xlim(xlo, xhi if xhi > xlo else xlo + 1e-3)
+        for ax, ys in ((self.ax_dxy, dxs + dys), (self.ax_mag, mags), (self.ax_alt, alts)):
+            if ys:
+                lo, hi = min(ys), max(ys)
+                if lo == hi:
+                    lo -= 1; hi += 1
+                pad = (hi - lo) * 0.1
+                ax.set_ylim(lo - pad, hi + pad)
+        self.ax_path.relim(); self.ax_path.autoscale_view()
+
+        self.fig.canvas.draw()
+        buf  = self.fig.canvas.buffer_rgba()
+        w, h = self.fig.canvas.get_width_height()
+        self._surf = pygame.image.frombuffer(buf, (w, h), 'RGBA')
+
+    def get_surface(self) -> pygame.Surface:
+        now = time.time()
+        if now - self._last_t >= self.RENDER_INTERVAL:
+            self._render()
+            self._last_t = now
+        return self._surf
+
+# ==========================================
+# pygame 狀態顯示（左側面板）
+# ==========================================
+def draw_status(screen, font, font_small, state, mode, channels, connected):
+    pygame.draw.rect(screen, (20, 20, 20), (0, 0, STATUS_W, WIN_H))
     conn_color = (80, 220, 80)  if connected               else (220, 80, 80)
     ah_color   = (80, 180, 255) if state['alt_hold_active'] else (160, 160, 160)
 
@@ -546,31 +708,49 @@ def draw_status(screen, font, state, mode, channels, connected):
 
     if state['alt_hold_active']:
         vel = channels.get('vel_cmd', 0)
-        vel_str = f"速度命令: {vel:+.1f} cm/s"
+        vel_str = f"速度: {vel:+.1f} cm/s"
         if _pid_throttle >= 0:
             pid_conv = int((_pid_throttle - 1000) / 1000.0 * 255)
-            vel_str += f"  PID油門: {pid_conv}"
+            vel_str += f"  PID: {pid_conv}"
         throttle_str = vel_str
     else:
-        throttle_str = f"油門: {channels['throttle']:3d}  基準: {state['base_throttle']:3d} (步進:{state['throttle_step']:2d})"
+        throttle_str = f"油門: {channels['throttle']:3d}  基準: {state['base_throttle']:3d} (步:{state['throttle_step']:2d})"
 
     lines = [
-        (f"模式: {'手把' if mode == 'gamepad' else '鍵盤'}  "
-         f"連線: {'連線中' if connected else '斷線'}  "
-         f"狀態: {'解鎖' if state['arm_state'] == 255 else '上鎖'}",
+        (f"{'手把' if mode == 'gamepad' else '鍵盤'} | {'連線中' if connected else '斷線'} | "
+         f"{'解鎖' if state['arm_state'] == 255 else '上鎖'}",
          conn_color),
-        (f"定高[速度模式]: {'開啟' if state['alt_hold_active'] else '關閉'}  " + throttle_str, ah_color),
-        (f"當前高度: {alt_str}", (255, 220, 60)),
-        (f"夾爪: {state['gripper_val']:3d}  Y: {channels['yaw']:3d}  "
-         f"P: {channels['pitch']:3d}  R: {channels['roll']:3d}  COM: {COM_PORT}",
+        (f"定高[速度模式]: {'開啟' if state['alt_hold_active'] else '關閉'}", ah_color),
+        (throttle_str, (200, 200, 200)),
+        (f"高度: {alt_str}", (255, 220, 60)),
+        (f"Y:{channels['yaw']:3d}  P:{channels['pitch']:3d}  R:{channels['roll']:3d}  夾:{state['gripper_val']:3d}",
          (180, 180, 180)),
-        ("○/H=定高切換  定高:搖桿=速度  死區=懸停  □/F=積分重設  Options/X長按3秒=退出  4+6=緊急停機",
-         (110, 110, 110)),
+        (f"COM: {COM_PORT}", (120, 120, 120)),
     ]
-    for i, (text, color) in enumerate(lines):
+    y = 15
+    for text, color in lines:
         surf = font.render(text, True, color)
-        screen.blit(surf, (12, 10 + i * 28))
-    pygame.display.flip()
+        screen.blit(surf, (12, y))
+        y += 30
+
+    pygame.draw.line(screen, (60, 60, 60), (8, y + 8), (STATUS_W - 8, y + 8), 1)
+    y += 22
+
+    help_lines = [
+        ("操作說明", (160, 160, 160)),
+        ("○/H  定高切換", (110, 110, 110)),
+        ("△/R  解鎖 / 上鎖", (110, 110, 110)),
+        ("□/F  積分重設", (110, 110, 110)),
+        ("D-pad↑↓  基準油門", (110, 110, 110)),
+        ("Options/X (3s)  退出", (110, 110, 110)),
+        ("4+6  緊急停機", (180, 80, 80)),
+    ]
+    for text, color in help_lines:
+        surf = font_small.render(text, True, color)
+        screen.blit(surf, (12, y))
+        y += 22
+
+    pygame.draw.line(screen, (50, 50, 70), (STATUS_W - 1, 0), (STATUS_W - 1, WIN_H), 1)
 
 # ==========================================
 # 主程式
@@ -588,11 +768,13 @@ except Exception:
     mode = 'keyboard'
     print("ℹ️ 未偵測到手把 → 鍵盤模式")
 
-screen = pygame.display.set_mode((620, 158))
+screen = pygame.display.set_mode((STATUS_W + CHART_W, WIN_H))
 pygame.display.set_caption(
     f"無人機控制站（速度模式定高）[{COM_PORT}] — {'手把' if mode == 'gamepad' else '鍵盤'}模式")
-font  = pygame.font.SysFont("Microsoft JhengHei", 18)
-clock = pygame.time.Clock()
+font       = pygame.font.SysFont("Microsoft JhengHei", 18)
+font_small = pygame.font.SysFont("Microsoft JhengHei", 14)
+clock      = pygame.time.Clock()
+_flow_display = EmbeddedFlowDisplay(CHART_W, WIN_H)
 
 print(f"\n嘗試連線到 {COM_PORT}...")
 bt_serial = wait_for_connection(mode, joystick, timeout=60)
@@ -656,23 +838,34 @@ def _handle_bt_line(line):
                 _current_alt = val
                 _alt_history.append(val)
             pid_logger.record(val, 0, _pid_throttle, channels.get('vel_cmd', 0))
+            _flow_display.record_alt(val)
         elif line.startswith('OF:'):
-            parts = line[3:].split(',')
-            if len(parts) == 2:
-                dx, dy = int(parts[0]), int(parts[1])
-                with _alt_lock:
-                    cur_alt_mm = _current_alt * 10.0
-                flow_logger.record(dx, dy, cur_alt_mm)
-                flow_live.record(dx, dy, cur_alt_mm)
+            payload = line[3:]
+            if payload == 'REINIT':
+                print("\n🔄 PMW3901 watchdog 觸發，嘗試重初始化...")
+            elif payload == 'REINIT_OK':
+                print("\n✅ PMW3901 重初始化成功")
+            elif payload == 'REINIT_FAIL':
+                print("\n❌ PMW3901 重初始化失敗")
+            else:
+                parts = payload.split(',')
+                if len(parts) == 2:
+                    dx, dy = int(parts[0]), int(parts[1])
+                    with _alt_lock:
+                        cur_alt_mm = _current_alt * 10.0
+                    flow_logger.record(dx, dy, cur_alt_mm)
+                    _flow_display.record(dx, dy, cur_alt_mm)
         elif line.startswith('P:'):
             _pid_throttle = int(line[2:])
         elif line.startswith('T:'):
             new_base = int((int(line[2:]) - 1000) / 1000.0 * 255)
             new_base = max(0, min(255, new_base))
             with _state_lock:
+                was_syncing = state['syncing_throttle']
                 state['base_throttle']    = new_base
                 state['syncing_throttle'] = False
-            print(f"\n✅ 基準油門已同步：{new_base}")
+            if was_syncing:
+                print(f"\n✅ 基準油門已同步：{new_base}")
         elif line.startswith('F:2'):
             with _state_lock:
                 if state['alt_hold_active']:
@@ -814,23 +1007,30 @@ try:
             arm_str  = "解鎖"   if state['arm_state'] == 255 else "上鎖"
             if state['alt_hold_active']:
                 vel = channels.get('vel_cmd', 0)
-                ah_str = f"速度:{vel:+.1f}cm/s"
+                ah_str = f"速:{vel:+.1f}"
                 if _pid_throttle >= 0:
                     pid_conv = int((_pid_throttle - 1000) / 1000.0 * 255)
-                    ah_str += f" PID:{pid_conv:3d}"
+                    ah_str += f"/{pid_conv:3d}"
             else:
-                ah_str = f"手動:{channels['throttle']:3d}"
+                ah_str = f"手:{channels['throttle']:3d}"
             with _alt_lock:
                 cur = _current_alt
-            cur_str = f"{cur:.1f}cm" if cur >= 0 else " ---"
-            print(f"[{conn_str}] {arm_str} | {ah_str} | 當前:{cur_str} | "
-                  f"基準:{current_base:3d} | 夾爪:{state['gripper_val']:3d} | "
-                  f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}",
-                  end="\r", flush=True)
+            cur_str = f"{cur:.1f}" if cur >= 0 else "---"
+            sys.stdout.write(
+                f"\r[{conn_str}] {arm_str} | {ah_str} | 高:{cur_str} | "
+                f"基:{current_base:3d} | 爪:{state['gripper_val']:3d} | "
+                f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}"
+                "\033[K"
+            )
+            sys.stdout.flush()
             last_print_time = now
 
         try:
-            draw_status(screen, font, state, mode, channels, connected)
+            draw_status(screen, font, font_small, state, mode, channels, connected)
+            surf = _flow_display.get_surface()
+            if surf:
+                screen.blit(surf, (STATUS_W, 0))
+            pygame.display.flip()
         except pygame.error:
             pass
         clock.tick(25)
@@ -843,7 +1043,7 @@ except pygame.error as e:
 finally:
     pid_logger.stop()
     flow_logger.stop()
-    flow_live.stop()
+    _flow_display.stop()
     print("\n🔌 正在關閉連線...")
     if bt_serial is not None and bt_serial.is_open:
         safe_disconnect(bt_serial)

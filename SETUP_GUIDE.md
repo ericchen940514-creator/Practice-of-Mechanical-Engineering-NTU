@@ -315,7 +315,7 @@ OK
 ### 7-1. 安裝 Python 套件
 
 ```bash
-pip install pyserial
+py -3.11 -m pip install pyserial
 ```
 
 ### 7-2. 設定 COM 埠
@@ -363,8 +363,11 @@ python test_bt.py
 ### 8-1. 安裝 pygame 套件
 
 ```bash
-pip install pygame
+py -3.11 -m pip install --upgrade pip setuptools wheel
+py -3.11 -m pip install pygame
 ```
+
+如果這一步出現 `Failed to build 'pygame' when getting requirements to build wheel`，通常不是專案程式碼錯，而是 Python / pip 安裝不完整，或是用到 Microsoft Store Python 導致子程序啟動失敗。先確認 `py -3.11 -m pip --version` 能正常執行；若不能，請改裝 python.org 的 Python 3.11 x64。
 
 ### 8-2. 將手把透過藍牙與電腦配對
 
@@ -409,7 +412,7 @@ BTN_CALIB   = 15
 ### 9-1. 安裝額外 Python 套件
 
 ```bash
-pip install keyboard
+py -3.11 -m pip install keyboard
 ```
 
 ### 9-2. 確認 COM 埠設定

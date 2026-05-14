@@ -43,8 +43,11 @@
 ## 環境安裝
 
 ```bash
-pip install pygame pyserial keyboard
+py -3.11 -m pip install --upgrade pip setuptools wheel
+py -3.11 -m pip install pygame pyserial keyboard
 ```
+
+如果 `py -3.11 -m pip` 無法執行，先重新安裝 Python（建議使用 python.org 的 Windows x64 installer，不要只用 Microsoft Store 版本），並勾選 `Add python.exe to PATH`。
 
 將 `sketch_althold_v6_velmode.ino` 燒錄到 Arduino（需先安裝 **VL53L0X by Pololu** 函式庫）。
 

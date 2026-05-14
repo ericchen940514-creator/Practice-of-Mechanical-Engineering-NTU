@@ -214,6 +214,8 @@ def start() -> None:
             _proc = subprocess.Popen(
                 [sys.executable, '-u', script],
                 stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )

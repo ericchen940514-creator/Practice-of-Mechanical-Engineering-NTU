@@ -31,12 +31,13 @@ Servo              gripper_servo;
 VL53L1X            distSensor;
 Bitcraze_PMW3901   flowSensor(5);   // CS = GPIO5
 
-const int SERVO_PIN   = 13;
-const int IBUS_RX_PIN = 16;
-const int IBUS_TX_PIN = 17;
-const int I2C_SDA_PIN = 21;
-const int I2C_SCL_PIN = 22;
-const int MSP_TX_PIN  = 25;
+const int SERVO_PIN      = 13;
+const int IBUS_RX_PIN    = 16;
+const int IBUS_TX_PIN    = 17;
+const int I2C_SDA_PIN    = 21;
+const int I2C_SCL_PIN    = 22;
+const int MSP_TX_PIN     = 25;
+const int FLOW_RST_PIN   = 26;  // PMW3901 NRESET（低電位重置）
 
 // -------------------- iBUS Channels --------------------
 uint16_t ibus_channels[14] = {
@@ -73,6 +74,11 @@ unsigned long last_of_report        = 0;
 
 int32_t accum_dx = 0;
 int32_t accum_dy = 0;
+
+// PMW3901 watchdog：偵測感測器卡死（持續全零）並自動重初始化
+int           flow_zero_count      = 0;
+const int     FLOW_REINIT_THRESH   = 300;  // 300 × 20 ms = 6 s 全零 → 重初始化
+bool          flow_reinit_pending  = false;
 
 // -------------------- PID Parameters --------------------
 const float Kp_vel           = 0.80f;
@@ -185,6 +191,14 @@ bool sensorFreshEnough() {
     return filter_inited && (millis() - last_valid_range_time <= SENSOR_FRESH_TIMEOUT_MS);
 }
 
+bool resetFlowSensor() {
+    digitalWrite(FLOW_RST_PIN, LOW);
+    delay(10);
+    digitalWrite(FLOW_RST_PIN, HIGH);
+    delay(50);  // PMW3901 開機穩定時間
+    return flowSensor.begin();
+}
+
 void sendIBUS() {
     uint8_t packet[32];
     packet[0] = 0x20;
@@ -293,7 +307,10 @@ void setup() {
     }
 
     // PMW3901
-    if (flowSensor.begin()) {
+    pinMode(FLOW_RST_PIN, OUTPUT);
+    digitalWrite(FLOW_RST_PIN, HIGH);
+    delay(10);
+    if (resetFlowSensor()) {
         flow_ok = true;
         Serial.println("PMW3901 Init OK");
     } else {
@@ -411,6 +428,7 @@ void loop() {
         }
 
         sendMSP2Rangefinder(valid ? mm : 0);
+        Serial.printf("[RF] mm=%d valid=%d timeout=%d\n", mm, valid, distSensor.timeoutOccurred());
     }
 
     // ── PMW3901 Read + MSP2 Optical Flow ──
@@ -420,6 +438,25 @@ void loop() {
 
         int16_t dx = 0, dy = 0;
         flowSensor.readMotionCount(&dx, &dy);
+
+        // Watchdog：連續全零超過門檻，認定感測器卡死，嘗試重初始化
+        if (dx == 0 && dy == 0) {
+            if (++flow_zero_count >= FLOW_REINIT_THRESH) {
+                flow_zero_count = 0;
+                Serial.println("PMW3901 watchdog: continuous zero detected, attempting HW reset...");
+                SerialBT.print("OF:REINIT\n");
+                flow_ok = resetFlowSensor();  // 硬體 RST + SPI 重初始化
+                if (flow_ok) {
+                    SerialBT.print("OF:REINIT_OK\n");
+                    Serial.println("PMW3901 HW reset + re-init OK");
+                } else {
+                    SerialBT.print("OF:REINIT_FAIL\n");
+                    Serial.println("PMW3901 HW reset + re-init FAILED");
+                }
+            }
+        } else {
+            flow_zero_count = 0;
+        }
 
         sendMSP2OptFlow(dx, dy, dt_s);
 
