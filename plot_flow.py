@@ -72,11 +72,10 @@ idx  = [len(files) - 1]
 cbar_ref = [None]  # 持有上一次的 colorbar，重畫時先移除避免堆疊
 
 fig = plt.figure(figsize=(13, 8))
-fig.subplots_adjust(bottom=0.13, left=0.07, right=0.97, top=0.91, wspace=0.35)
 
-ax_path = fig.add_subplot(1, 2, 1)
-ax_alt  = fig.add_subplot(2, 2, 2)
-ax_flow = fig.add_subplot(2, 2, 4)
+ax_path = fig.add_axes([0.07, 0.13, 0.40, 0.75])  # 固定大小，不隨資料縮放
+ax_alt  = fig.add_axes([0.58, 0.50, 0.38, 0.38])
+ax_flow = fig.add_axes([0.58, 0.13, 0.38, 0.28])
 
 ax_prev = fig.add_axes([0.35, 0.02, 0.1, 0.05])
 ax_next = fig.add_axes([0.55, 0.02, 0.1, 0.05])
@@ -90,6 +89,7 @@ def draw(i):
     if cbar_ref[0] is not None:
         try:
             cbar_ref[0].remove()
+            cbar_ref[0].ax.remove()
         except Exception:
             pass
         cbar_ref[0] = None
@@ -128,14 +128,15 @@ def draw(i):
     ax_path.set_xlabel('X 位移 (cm)')
     ax_path.set_ylabel('Y 位移 (cm)')
     ax_path.set_title(f'平面路徑（總位移 {total_dist:.1f} cm）')
-    ax_path.set_aspect('equal', adjustable='datalim')
+    ax_path.set_aspect('equal', adjustable='box')
     ax_path.legend(fontsize=9)
     ax_path.grid(True, linestyle=':', alpha=0.4)
 
     sm = plt.cm.ScalarMappable(cmap='plasma',
                                 norm=plt.Normalize(vmin=times[0], vmax=times[-1]))
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax_path, fraction=0.046, pad=0.04)
+    cbar_ax = fig.add_axes([0.47, 0.13, 0.015, 0.75])
+    cbar = fig.colorbar(sm, cax=cbar_ax)
     cbar.set_label('時間 (s)', fontsize=8)
     cbar_ref[0] = cbar
 

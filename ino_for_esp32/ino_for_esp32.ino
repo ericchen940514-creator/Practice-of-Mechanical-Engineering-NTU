@@ -351,6 +351,7 @@ void loop() {
             ibus_channels[3] = map(y_val,   0, 255, 1000, 2000);
             ibus_channels[4] = map(arm_val, 0, 255, 1000, 2000);
             ibus_channels[5] = 2000;
+            ibus_channels[6] = 2000;   // CH7 NAV POSHOLD 永遠開
 
             gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
 
