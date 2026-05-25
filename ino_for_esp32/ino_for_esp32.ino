@@ -1,6 +1,6 @@
 // Version: 0.7.0 (MSP2 Sensor Hub)
 // Changes from 0.6.1:
-//   - VL53L0X → VL53L1X (Pololu, Long mode, up to ~3.6 m)
+//   - VL53L0X → VL53L1X (Pololu, Medium mode, up to ~3.0 m)
 //   - Added PMW3901 optical flow via SPI (MOSI=23 MISO=19 SCK=18 CS=5)
 //   - Serial1 (GPIO25) → FC UART1 RX as MSP2 sensor input
 //     · MSP2_SENSOR_RANGEFINDER (0x1F01) at ~50 Hz
@@ -301,8 +301,8 @@ void setup() {
     // VL53L1X
     distSensor.setTimeout(500);
     if (distSensor.init()) {
-        distSensor.setDistanceMode(VL53L1X::Long);
-        distSensor.setMeasurementTimingBudget(50000);
+        distSensor.setDistanceMode(VL53L1X::Medium);
+        distSensor.setMeasurementTimingBudget(33000);
         distSensor.startContinuous(33);
         sensor_ok = true;
         Serial.println("VL53L1X Init OK");
