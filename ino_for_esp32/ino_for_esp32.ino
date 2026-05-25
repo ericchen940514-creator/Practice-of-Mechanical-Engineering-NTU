@@ -154,6 +154,10 @@ void sendMSP2Rangefinder(int dist_mm) {
 void sendMSP2OptFlow(int16_t dx, int16_t dy, float dt_s) {
     float fx = (dt_s > 0.001f) ? dx * COUNTS_TO_RAD / dt_s : 0.0f;
     float fy = (dt_s > 0.001f) ? dy * COUNTS_TO_RAD / dt_s : 0.0f;
+    if (fx >  20.0f) fx =  20.0f;
+    if (fx < -20.0f) fx = -20.0f;
+    if (fy >  20.0f) fy =  20.0f;
+    if (fy < -20.0f) fy = -20.0f;
     float bx = 0.0f, by = 0.0f;
     uint8_t quality = 200;
     uint8_t buf[17];
