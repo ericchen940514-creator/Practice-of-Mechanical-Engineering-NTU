@@ -40,7 +40,7 @@ __version__ = "0.5.0 (Velocity Mode)"
 # 啟動參數
 # ==========================================
 parser = argparse.ArgumentParser(description='無人機地面控制站（速度模式定高）')
-parser.add_argument('--port', default='COM5', help='藍牙 COM 埠（預設: COM5）')
+parser.add_argument('--port', default='COM4', help='藍牙 COM 埠（預設: COM4）')
 args = parser.parse_args()
 
 COM_PORT  = args.port
@@ -77,7 +77,7 @@ BTN_CALIB   = 15   # 右搖桿偏移補正（原 X 鍵，改到 15 防誤觸）
 # ==========================================
 def connect_serial():
     try:
-        s = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.05)
+        s = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.05, write_timeout=0.1)
         print(f"✅ 成功連線到 {COM_PORT}")
         return s
     except Exception as e:
@@ -238,41 +238,24 @@ def read_gamepad(joystick, state):
             state['is_exiting'] = False
             print("\n✅ 退出指令取消。")
 
-    # ○：切換定高
+    # ○：切換定點定高（iNav POSHOLD + ALTHOLD，只送 ah_val 0/1）
     curr_circle = joystick.get_button(BTN_CIRCLE)
     if curr_circle and not state['prev_circle']:
+        state['alt_hold_active'] = not state['alt_hold_active']
         if not state['alt_hold_active']:
-            if state['arm_state'] != 255:
-                print("\n⚠️ 未解鎖，無法啟動定高。")
-            else:
-                snap = get_alt_snapshot()
-                if snap >= 0:
-                    state['alt_hold_active'] = True
-                    pid_logger.start(snap)
-                    print(f"\n🔒 速度模式啟動！當前高度：{snap:.1f} cm")
-                    print(" 左搖桿死區=懸停(vel=0)，推上/下=爬升/下降速率")
-                else:
-                    print("\n⚠️ 感測器尚無資料，無法切入。")
-        else:
-            state['alt_hold_active'] = False
-            pid_logger.stop()
-            state['syncing_throttle']   = True
-            state['syncing_throttle_t'] = time.time()
-            print("\n🔓 定高關閉，等待油門同步...")
+            global _poshold_throttle
+            _poshold_throttle = -1
+        print(f"\n{'🔒 定點定高開啟' if state['alt_hold_active'] else '🔓 定點定高關閉'}")
     state['prev_circle'] = curr_circle
 
-    # □：定高時重設積分（reref）；手動時校準搖桿
+    # □：校準搖桿
     curr_sq = joystick.get_button(BTN_SQUARE)
     if curr_sq and not state['prev_sq']:
-        if state['alt_hold_active']:
-            state['reref_pending'] = True
-            print("\n🔄 積分重設中...")
-        else:
-            state['offset'] = (
-                joystick.get_axis(1), joystick.get_axis(0),
-                joystick.get_axis(3), joystick.get_axis(2),
-            )
-            print("\n⚙️ 搖桿校準完成。")
+        state['offset'] = (
+            joystick.get_axis(1), joystick.get_axis(0),
+            joystick.get_axis(3), joystick.get_axis(2),
+        )
+        print("\n⚙️ 搖桿校準完成。")
     state['prev_sq'] = curr_sq
 
     # 15：右搖桿偏移補正 trim（搖桿推到補正位置後按，置中後補正量自動生效）
@@ -309,8 +292,7 @@ def read_gamepad(joystick, state):
     state['prev_left'], state['prev_right'] = curr_left, curr_right
 
     oy, ox, op, or_ = state['offset']
-    # 速度模式下左搖桿直接用原始軸值，不套 oy，確保物理中心 = 0 速率
-    _thr_raw = joystick.get_axis(1) if state['alt_hold_active'] else joystick.get_axis(1) - oy
+    _thr_raw = joystick.get_axis(1) - oy
     raw_throttle = apply_expo(apply_dead_zone(_thr_raw), THROTTLE_EXPO)
     raw_yaw      = apply_expo(apply_dead_zone(joystick.get_axis(0) - ox), YAW_EXPO)
     raw_pitch    = apply_expo(apply_dead_zone(joystick.get_axis(3) - op), TILT_EXPO)
@@ -328,58 +310,35 @@ def read_gamepad(joystick, state):
     raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch))
     raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll))
 
-    # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖並跳到 60
+    # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖
     if state['arm_pending'] and not state['alt_hold_active']:
         if time.time() - state['arm_pending_t'] >= 0.25:
             state['arm_pending']    = False
             state['arm_state']      = 255
-            state['base_throttle']  = 60
             flow_logger.start()
             _flow_display.start()
             print("\n✅ 解鎖！")
 
-    if state['alt_hold_active']:
-        raw_throttle_vel = apply_dead_zone(_thr_raw)
-        vel_cmd = -raw_throttle_vel * ALT_VEL_SCALE
-        alt_byte = encode_vel(vel_cmd)
-        final_throttle = state['base_throttle']
+    vel_cmd  = 0
+    alt_byte = 128
+    if state['arm_pending']:
+        final_throttle = 0
     else:
-        vel_cmd    = 0
-        alt_byte   = 128
-        if state['arm_pending']:
-            final_throttle = 0
-        elif state['syncing_throttle']:
-            if time.time() - state['syncing_throttle_t'] > 5.0:
-                state['syncing_throttle'] = False
-                print("\n⚠️ 油門同步逾時，已自動解除凍結。")
-            final_throttle = state['base_throttle']
-        else:
-            final_throttle = max(0, min(255,
-                state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
+        final_throttle = max(0, min(255,
+            state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
 
     curr_tri = joystick.get_button(BTN_TRI)
     if curr_tri and not state['prev_tri']:
         if state['arm_state'] == 0 and not state['arm_pending']:
-            if state['alt_hold_active']:
-                state['arm_state'] = 255
-                snap = get_alt_snapshot()
-                if snap >= 0:
-                    pid_logger.start(snap)
-                flow_logger.start()
-                _flow_display.start()
-            else:
-                state['arm_pending']   = True
-                state['arm_pending_t'] = time.time()
-                state['base_throttle'] = 0
-                print("\n⏳ 解鎖中...")
+            state['arm_pending']   = True
+            state['arm_pending_t'] = time.time()
+            state['base_throttle'] = 0
+            print("\n⏳ 解鎖中...")
         else:
-            if state['alt_hold_active']:
-                pid_logger.stop()
             flow_logger.stop()
             _flow_display.stop()
-            state['arm_pending']   = False
-            state['arm_state']     = 0
-            state['base_throttle'] = 90
+            state['arm_pending'] = False
+            state['arm_state']   = 0
     state['prev_tri'] = curr_tri
 
     if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -411,41 +370,20 @@ def read_keyboard(state):
             state['is_exiting'] = False
             print("\n✅ 退出指令取消。")
 
-    # H：切換定高
+    # H：切換定點定高（iNav POSHOLD + ALTHOLD，只送 ah_val 0/1）
     curr_h = kb.is_pressed('h')
     if curr_h and not state['prev_h']:
+        state['alt_hold_active'] = not state['alt_hold_active']
         if not state['alt_hold_active']:
-            if state['arm_state'] != 255:
-                print("\n⚠️ 未解鎖，無法啟動定高。")
-            else:
-                snap = get_alt_snapshot()
-                if snap >= 0:
-                    state['alt_hold_active'] = True
-                    state['last_alt_update_t'] = time.time()
-                    pid_logger.start(snap)
-                    print(f"\n🔒 速度模式定高啟動！當前高度：{snap:.1f} cm")
-                else:
-                    print("\n⚠️ 感測器尚無資料，無法切入定高。")
-        else:
-            state['alt_hold_active'] = False
-            pid_logger.stop()
-            state['syncing_throttle']   = True
-            state['syncing_throttle_t'] = time.time()
-            print("\n🔓 定高關閉，等待油門同步...")
+            global _poshold_throttle
+            _poshold_throttle = -1
+        print(f"\n{'🔒 定點定高開啟' if state['alt_hold_active'] else '🔓 定點定高關閉'}")
     state['prev_h'] = curr_h
 
-    # F：重設積分
-    curr_f = kb.is_pressed('f')
-    if curr_f and not state['prev_f'] and state['alt_hold_active']:
-        state['reref_pending'] = True
-        print("\n🔄 積分重設中...")
-    state['prev_f'] = curr_f
-
-    if not state['alt_hold_active']:
-        if kb_triggered('tab'):   state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
-        if kb_triggered('shift'): state['base_throttle'] = max(0,   state['base_throttle'] - state['throttle_step'])
-        if kb_triggered('c'):     state['throttle_step'] = min(20, state['throttle_step'] + 1)
-        if kb_triggered('z'):     state['throttle_step'] = max(1,  state['throttle_step'] - 1)
+    if kb_triggered('tab'):   state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
+    if kb_triggered('shift'): state['base_throttle'] = max(0,   state['base_throttle'] - state['throttle_step'])
+    if kb_triggered('c'):     state['throttle_step'] = min(20, state['throttle_step'] + 1)
+    if kb_triggered('z'):     state['throttle_step'] = max(1,  state['throttle_step'] - 1)
 
     raw_throttle = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0))), THROTTLE_EXPO)
     raw_yaw      = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('a') else 0.0) + (1.0 if kb.is_pressed('d') else 0.0))), YAW_EXPO)
@@ -457,52 +395,28 @@ def read_keyboard(state):
         if time.time() - state['arm_pending_t'] >= 0.25:
             state['arm_pending']    = False
             state['arm_state']      = 255
-            state['base_throttle']  = 60
             print("\n✅ 解鎖！")
 
-    if state['alt_hold_active']:
-        raw_throttle_vel = apply_dead_zone(max(-1.0, min(1.0,
-            (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0))))
-        vel_cmd    = -raw_throttle_vel * ALT_VEL_SCALE
-        alt_byte   = encode_vel(vel_cmd)
-        final_throttle = state['base_throttle']
+    vel_cmd  = 0
+    alt_byte = 128
+    if state['arm_pending']:
+        final_throttle = 0
     else:
-        vel_cmd    = 0
-        alt_byte   = 128
-        if state['arm_pending']:
-            final_throttle = 0
-        elif state['syncing_throttle']:
-            if time.time() - state['syncing_throttle_t'] > 5.0:
-                state['syncing_throttle'] = False
-                print("\n⚠️ 油門同步逾時，已自動解除凍結。")
-            final_throttle = state['base_throttle']
-        else:
-            final_throttle = max(0, min(255,
-                state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
+        final_throttle = max(0, min(255,
+            state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
 
     curr_r = kb.is_pressed('r')
     if curr_r and not state['prev_r']:
         if state['arm_state'] == 0 and not state['arm_pending']:
-            if state['alt_hold_active']:
-                state['arm_state'] = 255
-                snap = get_alt_snapshot()
-                if snap >= 0:
-                    pid_logger.start(snap)
-                flow_logger.start()
-                _flow_display.start()
-            else:
-                state['arm_pending']   = True
-                state['arm_pending_t'] = time.time()
-                state['base_throttle'] = 0
-                print("\n⏳ 解鎖中...")
+            state['arm_pending']   = True
+            state['arm_pending_t'] = time.time()
+            state['base_throttle'] = 0
+            print("\n⏳ 解鎖中...")
         else:
-            if state['alt_hold_active']:
-                pid_logger.stop()
             flow_logger.stop()
             _flow_display.stop()
-            state['arm_pending']   = False
-            state['arm_state']     = 0
-            state['base_throttle'] = 90
+            state['arm_pending'] = False
+            state['arm_state']   = 0
     state['prev_r'] = curr_r
 
     if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -707,11 +621,10 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
     alt_str = f"{cur_alt:.1f} cm" if cur_alt >= 0 else "---"
 
     if state['alt_hold_active']:
-        vel = channels.get('vel_cmd', 0)
-        vel_str = f"速度: {vel:+.1f} cm/s"
-        if _pid_throttle >= 0:
-            pid_conv = int((_pid_throttle - 1000) / 1000.0 * 255)
-            vel_str += f"  PID: {pid_conv}"
+        vel_str = "定點定高中"
+        if _poshold_throttle >= 0:
+            fc_thr_255 = int((_poshold_throttle - 1000) / 1000.0 * 255)
+            vel_str += f"  FC油門: {fc_thr_255}"
         throttle_str = vel_str
     else:
         throttle_str = f"油門: {channels['throttle']:3d}  基準: {state['base_throttle']:3d} (步:{state['throttle_step']:2d})"
@@ -720,7 +633,7 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
         (f"{'手把' if mode == 'gamepad' else '鍵盤'} | {'連線中' if connected else '斷線'} | "
          f"{'解鎖' if state['arm_state'] == 255 else '上鎖'}",
          conn_color),
-        (f"定高[速度模式]: {'開啟' if state['alt_hold_active'] else '關閉'}", ah_color),
+        (f"定點定高: {'開啟' if state['alt_hold_active'] else '關閉'}", ah_color),
         (throttle_str, (200, 200, 200)),
         (f"高度: {alt_str}", (255, 220, 60)),
         (f"Y:{channels['yaw']:3d}  P:{channels['pitch']:3d}  R:{channels['roll']:3d}  夾:{state['gripper_val']:3d}",
@@ -738,7 +651,7 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
 
     help_lines = [
         ("操作說明", (160, 160, 160)),
-        ("○/H  定高切換", (110, 110, 110)),
+        ("○/H  定點定高切換", (110, 110, 110)),
         ("△/R  解鎖 / 上鎖", (110, 110, 110)),
         ("□/F  積分重設", (110, 110, 110)),
         ("D-pad↑↓  基準油門", (110, 110, 110)),
@@ -770,7 +683,7 @@ except Exception:
 
 screen = pygame.display.set_mode((STATUS_W + CHART_W, WIN_H))
 pygame.display.set_caption(
-    f"無人機控制站（速度模式定高）[{COM_PORT}] — {'手把' if mode == 'gamepad' else '鍵盤'}模式")
+    f"無人機控制站（定點定高）[{COM_PORT}] — {'手把' if mode == 'gamepad' else '鍵盤'}模式")
 font       = pygame.font.SysFont("Microsoft JhengHei", 18)
 font_small = pygame.font.SysFont("Microsoft JhengHei", 14)
 clock      = pygame.time.Clock()
@@ -819,8 +732,9 @@ _current_alt = -1.0
 _alt_history = deque(maxlen=10)
 _pid_throttle = -1
 
-_alt_last_accepted = -1.0
-_alt_last_accept_t =  0.0
+_alt_last_accepted  = -1.0
+_alt_last_accept_t  =  0.0
+_poshold_throttle   = -1   # FC 回報的平均馬達值（定點定高中）
 
 def get_alt_snapshot():
     with _alt_lock:
@@ -830,7 +744,7 @@ def get_alt_snapshot():
 
 def _handle_bt_line(line):
     """處理一行 ESP32 遙測文字（不含換行）。"""
-    global _current_alt, _pid_throttle
+    global _current_alt, _pid_throttle, _poshold_throttle
     try:
         if line.startswith('D:'):
             val = round(int(line[2:]) / 10.0, 1)
@@ -855,6 +769,10 @@ def _handle_bt_line(line):
                         cur_alt_mm = _current_alt * 10.0
                     flow_logger.record(dx, dy, cur_alt_mm)
                     _flow_display.record(dx, dy, cur_alt_mm)
+        elif line.startswith('DBG:'):
+            print(f"\n[DBG] {line[4:]}")
+        elif line.startswith('THR:'):
+            _poshold_throttle = int(line[4:])
         elif line.startswith('P:'):
             _pid_throttle = int(line[2:])
         elif line.startswith('T:'):
@@ -918,14 +836,14 @@ def _do_reconnect():
 threading.Thread(target=_serial_reader, daemon=True).start()
 
 if mode == 'gamepad':
-    print("\n🎮 手把模式（速度模式定高）")
-    print("△=解鎖/上鎖  ○=定高切換  □=積分重設  15=右搖桿偏移補正")
-    print("定高中：左搖桿死區=懸停，推上/下=爬升/下降速率")
+    print("\n🎮 手把模式（定點定高）")
+    print("△=解鎖/上鎖  ○=定點定高切換  □=積分重設  15=右搖桿偏移補正")
+    print("定點定高中：FC 自動保持位置與高度，顯示 FC 油門")
     print("手動：D-pad上下=基準油門±  Options長按3秒=退出  4+6=緊急停機\n")
 else:
-    print("\n⌨️ 鍵盤模式（速度模式定高）")
-    print("W/S=油門  A/D=偏航  ↑↓=俯仰  ←→=翻滾  R=解鎖/上鎖  H=定高切換")
-    print("定高中：W/S=爬升/下降速率，放開=懸停  F=積分重設")
+    print("\n⌨️ 鍵盤模式（定點定高）")
+    print("W/S=油門  A/D=偏航  ↑↓=俯仰  ←→=翻滾  R=解鎖/上鎖  H=定點定高切換")
+    print("定點定高中：FC 自動保持位置與高度，顯示 FC 油門")
     print("手動：Tab=油門↑  Shift=油門↓  C/Z=步進±  X長按3秒=退出\n")
 
 try:
@@ -959,11 +877,6 @@ try:
                 _bt_exit = bt_serial
             do_emergency_lock(_bt_exit, state)
             break
-
-        # 積分重設：送 ah_val=2
-        if state['reref_pending'] and state['alt_hold_active']:
-            state['reref_pending'] = False
-            channels['ah_val'] = 2
 
         with _state_lock:
             current_base = state['base_throttle']
@@ -1006,11 +919,10 @@ try:
             conn_str = "連線中" if connected else "斷線中"
             arm_str  = "解鎖"   if state['arm_state'] == 255 else "上鎖"
             if state['alt_hold_active']:
-                vel = channels.get('vel_cmd', 0)
-                ah_str = f"速:{vel:+.1f}"
-                if _pid_throttle >= 0:
-                    pid_conv = int((_pid_throttle - 1000) / 1000.0 * 255)
-                    ah_str += f"/{pid_conv:3d}"
+                ah_str = "定點定高"
+                if _poshold_throttle >= 0:
+                    fc_thr_255 = int((_poshold_throttle - 1000) / 1000.0 * 255)
+                    ah_str += f"/FC油門:{fc_thr_255}"
             else:
                 ah_str = f"手:{channels['throttle']:3d}"
             with _alt_lock:
@@ -1039,6 +951,11 @@ except KeyboardInterrupt:
     print("\n🛑 任務中止。")
 except pygame.error as e:
     print(f"\n💥 pygame 錯誤：{e}")
+except Exception as e:
+    import traceback
+    print(f"\n💥 未預期錯誤：{e}")
+    traceback.print_exc()
+    input("按 Enter 關閉...")
 
 finally:
     pid_logger.stop()

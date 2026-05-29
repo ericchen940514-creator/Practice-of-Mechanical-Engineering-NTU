@@ -10,12 +10,12 @@
 // Wiring:
 //   VL53L1X  I2C   SDA=21  SCL=22
 //   PMW3901  SPI   MOSI=23 MISO=19 SCK=18 CS=5
-//   iBUS     UART2 TX=17   RX=16 (unused)  → FC UART6 RX
-//   MSP2     UART1 TX=25                   → FC UART1 RX (iNAV: Sensor Input = MSP)
+//   iBUS     UART2 TX=17   RX=16 (unused)  → FC UART1 RX
+//   MSP2     UART1 TX=25   RX=34           ↔ FC UART3 (iNAV: Sensor Input = MSP)
 //   Servo    GPIO13
 //
 // iNAV setup required:
-//   Ports → UART1 → Sensor Input = MSP,  baud = 115200
+//   Ports → UART3 → Sensor Input = MSP,  baud = 115200
 
 #include <Wire.h>
 #include <SPI.h>
@@ -37,28 +37,32 @@ const int IBUS_TX_PIN    = 17;
 const int I2C_SDA_PIN    = 21;
 const int I2C_SCL_PIN    = 22;
 const int MSP_TX_PIN     = 25;
+const int MSP_RX_PIN     = 34;  // FC UART1 TX → ESP32（input-only GPIO）
 const int FLOW_RST_PIN   = 26;  // PMW3901 NRESET（低電位重置）
 
 // -------------------- iBUS Channels --------------------
 uint16_t ibus_channels[14] = {
   1500, 1500, 1000, 1500,
   1000, 2000,
-  1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500
+  1000, 1000, 1500, 1500, 1500, 1500, 1500, 1500
 };
 unsigned long last_ibus_time = 0;
 
 // -------------------- Control State --------------------
-bool  alt_hold_active  = false;
-int   manual_throttle  = 1500;
-float received_vel_cmd = 0.0f;
+bool alt_hold_ch7 = false;   // CH7 狀態（由 ah_val 控制）
+int  prev_ah_val  = 0;
 
-float v_est          = 0.0f;
-float integral_vel   = 0.0f;
-float last_vel_error = 0.0f;
-float prev_cm_filt   = -1.0f;
-float prev_cm_raw    = -1.0f;
-int   hover_estimate = 1500;
-unsigned long last_pid_time = 0;
+// 退出定高時先同步油門再切 CH7/CH8
+enum SyncState { SYNC_IDLE, SYNC_WAITING };
+SyncState     sync_state      = SYNC_IDLE;
+unsigned long sync_request_t  = 0;
+
+// 定點定高中持續回報 FC 油門
+enum ThrQueryState { THR_IDLE, THR_WAITING };
+ThrQueryState thr_state       = THR_IDLE;
+unsigned long thr_request_t   = 0;
+unsigned long last_thr_query_t = 0;
+const unsigned long THR_QUERY_INTERVAL_MS = 200;
 
 // -------------------- Sensor State --------------------
 bool  sensor_ok          = false;
@@ -80,17 +84,8 @@ int           flow_zero_count      = 0;
 const int     FLOW_REINIT_THRESH   = 300;  // 300 × 20 ms = 6 s 全零 → 重初始化
 bool          flow_reinit_pending  = false;
 
-// -------------------- PID Parameters --------------------
-const float Kp_vel           = 0.80f;
-const float Ki_vel           = 1.20f;
-const float Kd_vel           = 0.0f;
-const float MAX_VEL_CMD      = 60.0f;
-const float MAX_INTEGRAL_VEL = 220.0f;
-const float MAX_THR_OFFSET   = 220.0f;
-const float ALPHA            = 0.35f;
-const float GAMMA            = 0.20f;
-const float MAX_ALT_CM       = 300.0f;
-const int   MAX_THR_STEP     = 20;
+// -------------------- Filter --------------------
+const float ALPHA = 0.35f;
 
 const unsigned long ALT_REPORT_INTERVAL_MS  = 200;
 const unsigned long IBUS_SEND_INTERVAL_MS   = 20;
@@ -169,32 +164,52 @@ void sendMSP2OptFlow(int16_t dx, int16_t dy, float dt_s) {
     sendMSP2(MSP2_SENSOR_OPTIC_FLOW, buf, 17);
 }
 
+// -------------------- MSP v1 Motor Query --------------------
+void requestMSPMotor() {
+    // MSP v1 request: $ M < len=0 cmd=104 checksum=104
+    uint8_t pkt[] = {'$', 'M', '<', 0x00, 104, 104};
+    Serial1.write(pkt, sizeof(pkt));
+}
+
+// 嘗試從 Serial1 讀取 MSP_MOTOR 回應，成功時填入 motors[4] 並回傳 true
+bool readMSPMotorResponse(uint16_t motors[4]) {
+    static uint8_t  rbuf[32];
+    static int      rpos     = 0;
+    static unsigned long rts = 0;
+
+    while (Serial1.available()) {
+        uint8_t b = Serial1.read();
+        if (rpos == 0) {
+            if (b == '$') { rbuf[rpos++] = b; rts = millis(); }
+        } else {
+            rbuf[rpos++] = b;
+            // 等齊 header 6 bytes: $ M > len cmd ...
+            if (rpos >= 6) {
+                if (rbuf[0]=='$' && rbuf[1]=='M' && rbuf[2]=='>') {
+                    uint8_t len = rbuf[3];
+                    uint8_t cmd = rbuf[4];
+                    if (cmd == 104 && len == 16) {
+                        int need = 5 + 16 + 1;  // $M>+len+cmd(5) + payload(16) + checksum(1)
+                        if (rpos >= need) {
+                            for (int i = 0; i < 4; i++)
+                                motors[i] = rbuf[5 + i*2] | ((uint16_t)rbuf[6 + i*2] << 8);
+                            rpos = 0;
+                            return true;
+                        }
+                    } else {
+                        rpos = 0;
+                    }
+                } else {
+                    rpos = 0;
+                }
+            }
+        }
+        if (rpos > 0 && millis() - rts > 80) rpos = 0;
+    }
+    return false;
+}
+
 // -------------------- Helpers --------------------
-void resetAltHoldController() {
-    integral_vel     = 0.0f;
-    last_vel_error   = 0.0f;
-    v_est            = 0.0f;
-    prev_cm_filt     = -1.0f;
-    prev_cm_raw      = -1.0f;
-    received_vel_cmd = 0.0f;
-    last_pid_time    = millis();
-}
-
-void exitAltHoldToManual(int exit_thr) {
-    alt_hold_active  = false;
-    manual_throttle  = exit_thr;
-    ibus_channels[2] = exit_thr;
-    resetAltHoldController();
-    char tbuf[16];
-    snprintf(tbuf, sizeof(tbuf), "T:%d\n", exit_thr);
-    SerialBT.print(tbuf);
-    Serial.println("Alt Hold OFF -> Manual throttle resumed");
-}
-
-bool sensorFreshEnough() {
-    return filter_inited && (millis() - last_valid_range_time <= SENSOR_FRESH_TIMEOUT_MS);
-}
-
 bool resetFlowSensor() {
     digitalWrite(FLOW_RST_PIN, LOW);
     delay(10);
@@ -219,74 +234,13 @@ void sendIBUS() {
     Serial2.write(packet, 32);
 }
 
-void updateAltHold(float filt_mm) {
-    unsigned long now = millis();
-    float dt = (now - last_pid_time) / 1000.0f;
-    if (dt < 0.02f) return;
-    last_pid_time = now;
-
-    if (!sensorFreshEnough()) {
-        int fallback_thr = manual_throttle;
-        alt_hold_active  = false;
-        ibus_channels[2] = fallback_thr;
-        manual_throttle  = fallback_thr;
-        resetAltHoldController();
-        SerialBT.print("F:2\n");
-        char tbuf[16];
-        snprintf(tbuf, sizeof(tbuf), "T:%d\n", fallback_thr);
-        SerialBT.print(tbuf);
-        Serial.println("Alt Hold disabled: sensor data stale");
-        return;
-    }
-
-    if (filt_mm < 0.0f) return;
-
-    float current_cm   = filt_mm / 10.0f;
-    float safe_vel_cmd = received_vel_cmd;
-    if (current_cm > MAX_ALT_CM) safe_vel_cmd = min(safe_vel_cmd, -5.0f);
-
-    if (prev_cm_raw > 0.0f && fabs(current_cm - prev_cm_raw) > 15.0f) {
-        prev_cm_raw  = current_cm;
-        prev_cm_filt = current_cm;
-        v_est = 0.0f;
-        return;
-    }
-    prev_cm_raw = current_cm;
-
-    if (prev_cm_filt < 0.0f) prev_cm_filt = current_cm;
-
-    float v_raw = constrain((current_cm - prev_cm_filt) / dt, -100.0f, 100.0f);
-    v_est = GAMMA * v_raw + (1.0f - GAMMA) * v_est;
-    prev_cm_filt = current_cm;
-
-    float vel_error = safe_vel_cmd - v_est;
-    float d_vel     = (vel_error - last_vel_error) / dt;
-    last_vel_error  = vel_error;
-
-    float tentative_offset = Kp_vel * vel_error + Ki_vel * integral_vel + Kd_vel * d_vel;
-    if (fabs(tentative_offset) < MAX_THR_OFFSET * 0.85f) {
-        integral_vel += vel_error * dt;
-    } else if (vel_error * integral_vel > 0.0f) {
-        integral_vel *= 0.92f;
-    }
-    integral_vel = constrain(integral_vel, -MAX_INTEGRAL_VEL, MAX_INTEGRAL_VEL);
-
-    float thr_offset = Kp_vel * vel_error + Ki_vel * integral_vel + Kd_vel * d_vel;
-    thr_offset = constrain(thr_offset, -MAX_THR_OFFSET, MAX_THR_OFFSET);
-
-    int desired = constrain(hover_estimate + (int)thr_offset, 1100, 1750);
-    ibus_channels[2] = constrain(desired,
-        (int)ibus_channels[2] - MAX_THR_STEP,
-        (int)ibus_channels[2] + MAX_THR_STEP);
-}
-
 // -------------------- Setup --------------------
 void setup() {
     Serial.begin(115200);
     delay(200);
 
     Serial2.begin(115200, SERIAL_8N1, IBUS_RX_PIN, IBUS_TX_PIN);
-    Serial1.begin(115200, SERIAL_8N1, -1, MSP_TX_PIN);
+    Serial1.begin(115200, SERIAL_8N1, MSP_RX_PIN, MSP_TX_PIN);
 
     SerialBT.begin("ESP32_Drone_Hub");
     Serial.println("ESP32 Bluetooth Started!");
@@ -328,6 +282,69 @@ void setup() {
 // -------------------- Loop --------------------
 void loop() {
 
+    // ── 退出定高油門同步 ──
+    if (sync_state == SYNC_WAITING) {
+        uint16_t motors[4];
+        bool got     = readMSPMotorResponse(motors);
+        bool timeout = (millis() - sync_request_t > 80);
+
+        if (got || timeout) {
+            int sync_thr = 1500;
+            if (got) {
+                long sum = 0; int cnt = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (motors[i] >= 1000 && motors[i] <= 2000) { sum += motors[i]; cnt++; }
+                }
+                if (cnt > 0) sync_thr = (int)(sum / cnt);
+            }
+            ibus_channels[2] = sync_thr;
+            ibus_channels[6] = 1000;  // ALTHOLD off
+            ibus_channels[7] = 1000;  // POSHOLD off
+            alt_hold_ch7     = false;
+            thr_state        = THR_IDLE;
+            char tbuf[16];
+            snprintf(tbuf, sizeof(tbuf), "T:%d\n", sync_thr);
+            SerialBT.print(tbuf);
+            Serial.printf("Throttle sync: %d (%s)\n", sync_thr, got ? "MSP" : "timeout");
+            sync_state = SYNC_IDLE;
+        }
+    }
+
+    // ── 定點定高：週期性回報 FC 油門 ──
+    if (alt_hold_ch7 && sync_state == SYNC_IDLE) {
+        if (thr_state == THR_IDLE && millis() - last_thr_query_t >= THR_QUERY_INTERVAL_MS) {
+            requestMSPMotor();
+            thr_state      = THR_WAITING;
+            thr_request_t  = millis();
+        }
+        if (thr_state == THR_WAITING) {
+            uint16_t motors[4];
+            bool got      = readMSPMotorResponse(motors);
+            bool thr_tout = (millis() - thr_request_t > 100);
+            if (got || thr_tout) {
+                if (got) {
+                    char dbg[48];
+                    snprintf(dbg, sizeof(dbg), "DBG:M%d,%d,%d,%d\n",
+                             motors[0], motors[1], motors[2], motors[3]);
+                    SerialBT.print(dbg);
+                    long sum = 0; int cnt = 0;
+                    for (int i = 0; i < 4; i++) {
+                        if (motors[i] >= 1000 && motors[i] <= 2000) { sum += motors[i]; cnt++; }
+                    }
+                    if (cnt > 0) {
+                        char hbuf[16];
+                        snprintf(hbuf, sizeof(hbuf), "THR:%d\n", (int)(sum / cnt));
+                        SerialBT.print(hbuf);
+                    }
+                } else {
+                    SerialBT.print("DBG:THR_TOUT\n");
+                }
+                thr_state       = THR_IDLE;
+                last_thr_query_t = millis();
+            }
+        }
+    }
+
     // ── BT Packet Parsing ──
     while (SerialBT.available()) {
         if (SerialBT.peek() != 'S') { SerialBT.read(); continue; }
@@ -352,39 +369,29 @@ void loop() {
 
             ibus_channels[0] = map(r_val,   0, 255, 1000, 2000);
             ibus_channels[1] = map(p_val,   0, 255, 1000, 2000);
+            if (sync_state == SYNC_IDLE)
+                ibus_channels[2] = map(thr_val, 0, 255, 1000, 2000);
             ibus_channels[3] = map(y_val,   0, 255, 1000, 2000);
             ibus_channels[4] = map(arm_val, 0, 255, 1000, 2000);
             ibus_channels[5] = 2000;
-            ibus_channels[6] = 2000;   // CH7 NAV POSHOLD 永遠開
 
+            // 偵測 1→0（退出定點定高）：先發 MSP_MOTOR 請求，CH7/CH8 暫時保持高
+            if (prev_ah_val == 1 && ah_val == 0 && sync_state == SYNC_IDLE) {
+                // 清掉可能殘留的 THR query response，避免 SYNC 吃到過時資料
+                while (Serial1.available()) Serial1.read();
+                requestMSPMotor();
+                sync_state       = SYNC_WAITING;
+                sync_request_t   = millis();
+                thr_state        = THR_IDLE;  // 取消定點輪詢
+                ibus_channels[6] = 2000;      // 等同步完再切
+                ibus_channels[7] = 2000;
+            } else if (sync_state == SYNC_IDLE) {
+                ibus_channels[6] = (ah_val == 1) ? 2000 : 1000;  // ALTHOLD
+                ibus_channels[7] = (ah_val == 1) ? 2000 : 1000;  // POSHOLD
+            }
+            prev_ah_val  = ah_val;
+            alt_hold_ch7 = (ah_val == 1);
             gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
-
-            if (ah_val == 0) {
-                manual_throttle = map(thr_val, 0, 255, 1000, 2000);
-            }
-
-            if (alt_hold_active) {
-                received_vel_cmd = constrain((float)(alt_val - 128), -MAX_VEL_CMD, MAX_VEL_CMD);
-            }
-
-            if (ah_val == 1 && !alt_hold_active) {
-                if (arm_val > 127 && sensor_ok && sensorFreshEnough()) {
-                    resetAltHoldController();
-                    hover_estimate  = (manual_throttle >= 1250) ? manual_throttle : 1500;
-                    alt_hold_active = true;
-                    Serial.println("Alt Hold ON");
-                } else {
-                    Serial.println("Alt Hold request rejected: not armed or sensor not ready");
-                }
-            } else if (ah_val == 2 && alt_hold_active) {
-                hover_estimate = ibus_channels[2];
-                resetAltHoldController();
-                Serial.println("Alt Hold recentered");
-            } else if (ah_val == 0 && alt_hold_active) {
-                exitAltHoldToManual(ibus_channels[2]);
-            } else if (ah_val == 0 && !alt_hold_active) {
-                ibus_channels[2] = manual_throttle;
-            }
         }
     }
 
@@ -414,7 +421,6 @@ void loop() {
                     filter_inited = true;
                     freeze_count  = 0;
                     skip_ema      = true;
-                    resetAltHoldController();
                 }
             } else {
                 freeze_count = 0;
@@ -469,22 +475,11 @@ void loop() {
         accum_dy += dy;
     }
 
-    // ── Alt Hold Controller ──
-    if (alt_hold_active) {
-        updateAltHold(filtered_mm);
-    }
-
     // ── BT Altitude Telemetry ──
     if (sensor_ok && millis() - last_alt_report >= ALT_REPORT_INTERVAL_MS && filtered_mm > 0.0f) {
         char dbuf[16];
         snprintf(dbuf, sizeof(dbuf), "D:%d\n", (int)filtered_mm);
         SerialBT.print(dbuf);
-
-        if (alt_hold_active) {
-            char pbuf[16];
-            snprintf(pbuf, sizeof(pbuf), "P:%d\n", ibus_channels[2]);
-            SerialBT.print(pbuf);
-        }
         last_alt_report = millis();
     }
 
