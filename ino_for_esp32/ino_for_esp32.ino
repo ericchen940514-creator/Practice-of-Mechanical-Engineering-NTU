@@ -336,35 +336,10 @@ void setup() {
 }
 
 // -------------------- Loop --------------------
+unsigned long last_thr_query_t       = 0;
+const unsigned long THR_QUERY_INTERVAL_MS = 200;
+
 void loop() {
-
-    // ── 退出定高油門同步 ──
-    if (sync_state == SYNC_WAITING) {
-        uint16_t motors[4];
-        bool got     = readMSPMotorResponse(motors);
-        bool timeout = (millis() - sync_request_t > 80);
-
-        if (got || timeout) {
-            int sync_thr = 1500;
-            if (got) {
-                long sum = 0; int cnt = 0;
-                for (int i = 0; i < 4; i++) {
-                    if (motors[i] >= 1000 && motors[i] <= 2000) { sum += motors[i]; cnt++; }
-                }
-                if (cnt > 0) sync_thr = (int)(sum / cnt);
-            }
-            ibus_channels[2] = sync_thr;
-            ibus_channels[6] = 1000;  // ALTHOLD off
-            ibus_channels[7] = 1000;  // POSHOLD off
-            alt_hold_ch7     = false;
-            thr_state        = THR_IDLE;
-            char tbuf[16];
-            snprintf(tbuf, sizeof(tbuf), "T:%d\n", sync_thr);
-            SerialBT.print(tbuf);
-            Serial.printf("Throttle sync: %d (%s)\n", sync_thr, got ? "MSP" : "timeout");
-            sync_state = SYNC_IDLE;
-        }
-    }
 
     // ── 定高中週期性回報 ESP32 PID 油門 ──
     if (alt_hold_pid && millis() - last_thr_query_t >= THR_QUERY_INTERVAL_MS) {
