@@ -72,6 +72,16 @@ BTN_ESTOP_A = 4
 BTN_ESTOP_B = 6
 BTN_CALIB   = 15   # 右搖桿偏移補正（原 X 鍵，改到 15 防誤觸）
 
+# ── 光流自動 Trim ──
+FLOW_AUTOTRIM_GAIN     = 0.008    # trim 基礎增益（trim/normalized_unit/s）
+FLOW_AUTOTRIM_BOOST    = 0.15     # 非線性加速係數；有效增益 = GAIN×(1+BOOST×|error|)
+FLOW_AUTOTRIM_DEADZONE = 1.0      # 物理單位 cm 等效，低於此值不積分
+FLOW_AUTOTRIM_MAX      = 0.35     # 自動 trim 上限（±，在 trim ±1 空間）
+FLOW_AUTOTRIM_WINDOW_S = 0.6      # 平均窗口（秒）
+FLOW_PITCH_SIGN        = +1       # dy → pitch 補正方向；飄移方向反向時改 -1
+FLOW_ROLL_SIGN         = +1       # dx → roll  補正方向；飄移方向反向時改 -1
+_FLOW_COUNTS_TO_RAD    = 0.01     # PMW3901 每 count 對應的視角（rad），與 flow_live 一致
+
 # ==========================================
 # 藍牙工具
 # ==========================================
@@ -306,9 +316,13 @@ def read_gamepad(joystick, state):
             raw_pitch = 0.0
             raw_roll  = 0.0
 
+    state['stick_pitch'] = raw_pitch
+    state['stick_roll']  = raw_roll
     trim_pitch, trim_roll = state['right_stick_trim']
-    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch))
-    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll))
+    auto_p = state['flow_autotrim_pitch']
+    auto_r = state['flow_autotrim_roll']
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch + auto_p))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll  + auto_r))
 
     # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -337,8 +351,10 @@ def read_gamepad(joystick, state):
         else:
             flow_logger.stop()
             _flow_display.stop()
-            state['arm_pending'] = False
-            state['arm_state']   = 0
+            state['arm_pending']         = False
+            state['arm_state']           = 0
+            state['flow_autotrim_pitch'] = 0.0
+            state['flow_autotrim_roll']  = 0.0
     state['prev_tri'] = curr_tri
 
     if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -389,6 +405,10 @@ def read_keyboard(state):
     raw_yaw      = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('a') else 0.0) + (1.0 if kb.is_pressed('d') else 0.0))), YAW_EXPO)
     raw_pitch    = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('up') else 0.0) + (1.0 if kb.is_pressed('down') else 0.0))), TILT_EXPO)
     raw_roll     = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left') else 0.0) + (1.0 if kb.is_pressed('right') else 0.0))), TILT_EXPO)
+    state['stick_pitch'] = raw_pitch
+    state['stick_roll']  = raw_roll
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch']))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']))
 
     # 解鎖序列
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -415,8 +435,10 @@ def read_keyboard(state):
         else:
             flow_logger.stop()
             _flow_display.stop()
-            state['arm_pending'] = False
-            state['arm_state']   = 0
+            state['arm_pending']         = False
+            state['arm_state']           = 0
+            state['flow_autotrim_pitch'] = 0.0
+            state['flow_autotrim_roll']  = 0.0
     state['prev_r'] = curr_r
 
     if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -638,6 +660,8 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
         (f"高度: {alt_str}", (255, 220, 60)),
         (f"Y:{channels['yaw']:3d}  P:{channels['pitch']:3d}  R:{channels['roll']:3d}  夾:{state['gripper_val']:3d}",
          (180, 180, 180)),
+        (f"自動Trim  P:{state['flow_autotrim_pitch']:+.3f}  R:{state['flow_autotrim_roll']:+.3f}",
+         (100, 200, 120)),
         (f"COM: {COM_PORT}", (120, 120, 120)),
     ]
     y = 15
@@ -715,6 +739,10 @@ state = {
     'syncing_throttle_t': 0.0,  # syncing 開始時間，逾時自動解除
     'arm_pending': False,        # 解鎖序列：先送 0 油門讓 Betaflight 接受，再跳 60
     'arm_pending_t': 0.0,
+    'flow_autotrim_pitch': 0.0,
+    'flow_autotrim_roll':  0.0,
+    'stick_pitch': 0.0,
+    'stick_roll':  0.0,
 }
 
 channels = {'throttle': 0, 'alt_byte': 128, 'vel_cmd': 0,
@@ -735,6 +763,9 @@ _pid_throttle = -1
 _alt_last_accepted  = -1.0
 _alt_last_accept_t  =  0.0
 _poshold_throttle   = -1   # FC 回報的平均馬達值（定點定高中）
+
+_flow_buf_lock = threading.Lock()
+_flow_buf      = deque()  # (t, dx, dy)
 
 def get_alt_snapshot():
     with _alt_lock:
@@ -769,6 +800,8 @@ def _handle_bt_line(line):
                         cur_alt_mm = _current_alt * 10.0
                     flow_logger.record(dx, dy, cur_alt_mm)
                     _flow_display.record(dx, dy, cur_alt_mm)
+                    with _flow_buf_lock:
+                        _flow_buf.append((time.time(), dx, dy))
         elif line.startswith('DBG:'):
             print(f"\n[DBG] {line[4:]}")
         elif line.startswith('THR:'):
@@ -794,6 +827,44 @@ def _handle_bt_line(line):
             print("\n⚠️ 感測器逾時，定高已被 ESP32 強制關閉！")
     except (ValueError, UnicodeDecodeError):
         pass
+
+def _update_flow_autotrim(state):
+    """光流自動 trim：解鎖且搖桿無輸入時，用流量緩慢積分修正 pitch/roll 基準。
+    counts 先乘以高度換算成物理單位，使校正行為不隨飛行高度改變。"""
+    if state['arm_state'] != 255:
+        return
+    if state['alt_hold_active']:
+        return  # iNav POSHOLD 中由 FC 自己用光流定點；autotrim 此時會干擾 RC 指令
+    if abs(state.get('stick_pitch', 0.0)) > 0.08 or abs(state.get('stick_roll', 0.0)) > 0.08:
+        return
+    now = time.time()
+    cutoff = now - FLOW_AUTOTRIM_WINDOW_S
+    with _flow_buf_lock:
+        while _flow_buf and _flow_buf[0][0] < cutoff:
+            _flow_buf.popleft()
+        if len(_flow_buf) < 4:
+            return
+        mean_dx = sum(v[1] for v in _flow_buf) / len(_flow_buf)
+        mean_dy = sum(v[2] for v in _flow_buf) / len(_flow_buf)
+    # 換算成物理單位：counts × alt(cm) × rad_per_count
+    # 讓 deadzone/gain 跟飛行高度無關
+    with _alt_lock:
+        alt_cm = _current_alt
+    alt_cm = max(alt_cm, 20.0)  # 避免除零；低於 20cm 用 20cm 做下限
+    norm_dx = mean_dx * alt_cm * _FLOW_COUNTS_TO_RAD
+    norm_dy = mean_dy * alt_cm * _FLOW_COUNTS_TO_RAD
+    dt = 0.04
+    if abs(norm_dx) > FLOW_AUTOTRIM_DEADZONE:
+        gain_r = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dx))
+        delta = -FLOW_ROLL_SIGN * norm_dx * gain_r * dt
+        state['flow_autotrim_roll'] = max(-FLOW_AUTOTRIM_MAX,
+            min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_roll'] + delta))
+    if abs(norm_dy) > FLOW_AUTOTRIM_DEADZONE:
+        gain_p = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dy))
+        delta = -FLOW_PITCH_SIGN * norm_dy * gain_p * dt
+        state['flow_autotrim_pitch'] = max(-FLOW_AUTOTRIM_MAX,
+            min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_pitch'] + delta))
+
 
 def _serial_reader():
     # 用 in_waiting 輪詢 + 手動 buffer 累積到換行才處理。
@@ -878,6 +949,8 @@ try:
             do_emergency_lock(_bt_exit, state)
             break
 
+        _update_flow_autotrim(state)
+
         with _state_lock:
             current_base = state['base_throttle']
 
@@ -928,10 +1001,13 @@ try:
             with _alt_lock:
                 cur = _current_alt
             cur_str = f"{cur:.1f}" if cur >= 0 else "---"
+            ap = state['flow_autotrim_pitch']
+            ar = state['flow_autotrim_roll']
             sys.stdout.write(
                 f"\r[{conn_str}] {arm_str} | {ah_str} | 高:{cur_str} | "
                 f"基:{current_base:3d} | 爪:{state['gripper_val']:3d} | "
-                f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d}"
+                f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d} | "
+                f"AT P:{ap:+.3f} R:{ar:+.3f}"
                 "\033[K"
             )
             sys.stdout.flush()
