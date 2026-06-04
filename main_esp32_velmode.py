@@ -336,10 +336,10 @@ def read_gamepad(joystick, state):
     state['stick_pitch'] = raw_pitch
     state['stick_roll']  = raw_roll
     trim_pitch, trim_roll = state['right_stick_trim']
-    # auto_p = state['flow_autotrim_pitch']  # 暫停光流校正
-    # auto_r = state['flow_autotrim_roll']
-    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch))
-    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll))
+    auto_p = state['flow_autotrim_pitch']
+    auto_r = state['flow_autotrim_roll']
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch + auto_p))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll  + auto_r))
 
     # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -448,8 +448,8 @@ def read_keyboard(state):
     raw_roll     = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left') else 0.0) + (1.0 if kb.is_pressed('right') else 0.0))), TILT_EXPO)
     state['stick_pitch'] = raw_pitch
     state['stick_roll']  = raw_roll
-    # raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch']))  # 暫停光流校正
-    # raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']))
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch']))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']))
 
     # 解鎖序列
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -910,36 +910,36 @@ def _handle_bt_line(line):
     except (ValueError, UnicodeDecodeError):
         pass
 
-# def _update_flow_autotrim(state):  # 暫停光流校正
-#     if state['arm_state'] != 255:
-#         return
-#     if abs(state.get('stick_pitch', 0.0)) > 0.08 or abs(state.get('stick_roll', 0.0)) > 0.08:
-#         return
-#     now = time.time()
-#     cutoff = now - FLOW_AUTOTRIM_WINDOW_S
-#     with _flow_buf_lock:
-#         while _flow_buf and _flow_buf[0][0] < cutoff:
-#             _flow_buf.popleft()
-#         if len(_flow_buf) < 4:
-#             return
-#         mean_dx = sum(v[1] for v in _flow_buf) / len(_flow_buf)
-#         mean_dy = sum(v[2] for v in _flow_buf) / len(_flow_buf)
-#     with _alt_lock:
-#         alt_cm = _current_alt
-#     alt_cm = max(alt_cm, 20.0)
-#     norm_dx = mean_dx * alt_cm * _FLOW_COUNTS_TO_RAD
-#     norm_dy = mean_dy * alt_cm * _FLOW_COUNTS_TO_RAD
-#     dt = 0.04
-#     if abs(norm_dx) > FLOW_AUTOTRIM_DEADZONE:
-#         gain_r = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dx))
-#         delta = -FLOW_ROLL_SIGN * norm_dx * gain_r * dt
-#         state['flow_autotrim_roll'] = max(-FLOW_AUTOTRIM_MAX,
-#             min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_roll'] + delta))
-#     if abs(norm_dy) > FLOW_AUTOTRIM_DEADZONE:
-#         gain_p = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dy))
-#         delta = -FLOW_PITCH_SIGN * norm_dy * gain_p * dt
-#         state['flow_autotrim_pitch'] = max(-FLOW_AUTOTRIM_MAX,
-#             min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_pitch'] + delta))
+def _update_flow_autotrim(state):
+    if state['arm_state'] != 255:
+        return
+    if abs(state.get('stick_pitch', 0.0)) > 0.08 or abs(state.get('stick_roll', 0.0)) > 0.08:
+        return
+    now = time.time()
+    cutoff = now - FLOW_AUTOTRIM_WINDOW_S
+    with _flow_buf_lock:
+        while _flow_buf and _flow_buf[0][0] < cutoff:
+            _flow_buf.popleft()
+        if len(_flow_buf) < 4:
+            return
+        mean_dx = sum(v[1] for v in _flow_buf) / len(_flow_buf)
+        mean_dy = sum(v[2] for v in _flow_buf) / len(_flow_buf)
+    with _alt_lock:
+        alt_cm = _current_alt
+    alt_cm = max(alt_cm, 20.0)
+    norm_dx = mean_dx * alt_cm * _FLOW_COUNTS_TO_RAD
+    norm_dy = mean_dy * alt_cm * _FLOW_COUNTS_TO_RAD
+    dt = 0.04
+    if abs(norm_dx) > FLOW_AUTOTRIM_DEADZONE:
+        gain_r = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dx))
+        delta = -FLOW_ROLL_SIGN * norm_dx * gain_r * dt
+        state['flow_autotrim_roll'] = max(-FLOW_AUTOTRIM_MAX,
+            min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_roll'] + delta))
+    if abs(norm_dy) > FLOW_AUTOTRIM_DEADZONE:
+        gain_p = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dy))
+        delta = -FLOW_PITCH_SIGN * norm_dy * gain_p * dt
+        state['flow_autotrim_pitch'] = max(-FLOW_AUTOTRIM_MAX,
+            min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_pitch'] + delta))
 
 
 def _serial_reader():
@@ -1025,7 +1025,7 @@ try:
             do_emergency_lock(_bt_exit, state)
             break
 
-        # _update_flow_autotrim(state)  # 暫停光流校正
+        _update_flow_autotrim(state)
 
         with _state_lock:
             current_base = state['base_throttle']
