@@ -78,6 +78,7 @@ FLOW_AUTOTRIM_BOOST    = 0.15     # 非線性加速係數；有效增益 = GAIN�
 FLOW_AUTOTRIM_DEADZONE = 1.0      # 物理單位 cm 等效，低於此值不積分
 FLOW_AUTOTRIM_MAX      = 0.35     # 自動 trim 上限（±，在 trim ±1 空間）
 FLOW_AUTOTRIM_WINDOW_S = 0.6      # 平均窗口（秒）
+FLOW_AUTOTRIM_STICK_FREEZE = 0.10 # 搖桿超過此值時凍結 autotrim，允許主動移動
 FLOW_PITCH_SIGN        = +1       # dy → pitch 補正方向；飄移方向反向時改 -1
 FLOW_ROLL_SIGN         = +1       # dx → roll  補正方向；飄移方向反向時改 -1
 _FLOW_COUNTS_TO_RAD    = 0.01     # PMW3901 每 count 對應的視角（rad），與 flow_live 一致
@@ -930,6 +931,10 @@ def _update_flow_autotrim(state):
     norm_dx = mean_dx * alt_cm * _FLOW_COUNTS_TO_RAD
     norm_dy = mean_dy * alt_cm * _FLOW_COUNTS_TO_RAD
     dt = 0.04
+    # 搖桿有輸入時凍結 autotrim，讓使用者可以主動移動
+    if (abs(state['stick_pitch']) > FLOW_AUTOTRIM_STICK_FREEZE or
+            abs(state['stick_roll']) > FLOW_AUTOTRIM_STICK_FREEZE):
+        return
     if abs(norm_dx) > FLOW_AUTOTRIM_DEADZONE:
         gain_r = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dx))
         delta = -FLOW_ROLL_SIGN * norm_dx * gain_r * dt
