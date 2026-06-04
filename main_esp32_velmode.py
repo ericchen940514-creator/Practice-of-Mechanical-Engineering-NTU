@@ -248,14 +248,22 @@ def read_gamepad(joystick, state):
             state['is_exiting'] = False
             print("\n✅ 退出指令取消。")
 
-    # ○：切換定點定高（iNav POSHOLD + ALTHOLD，只送 ah_val 0/1）
+    # ○：切換定點定高（iNav ALTHOLD，只送 ah_val 0/1）
     curr_circle = joystick.get_button(BTN_CIRCLE)
     if curr_circle and not state['prev_circle']:
-        state['alt_hold_active'] = not state['alt_hold_active']
         if not state['alt_hold_active']:
+            oy, ox, op, or_ = state['offset']
+            thr_raw = joystick.get_axis(1) - oy
+            if abs(thr_raw) > 0.25:
+                print(f"\n⚠️ 油門未置中（偏移 {thr_raw:+.2f}），請先置中再切 ALTHOLD 避免暴衝")
+            else:
+                state['alt_hold_active'] = True
+                print("\n🔒 定高開啟")
+        else:
             global _poshold_throttle
             _poshold_throttle = -1
-        print(f"\n{'🔒 定點定高開啟' if state['alt_hold_active'] else '🔓 定點定高關閉'}")
+            state['alt_hold_active'] = False
+            print("\n🔓 定高關閉")
     state['prev_circle'] = curr_circle
 
     # □：校準搖桿
@@ -386,14 +394,22 @@ def read_keyboard(state):
             state['is_exiting'] = False
             print("\n✅ 退出指令取消。")
 
-    # H：切換定點定高（iNav POSHOLD + ALTHOLD，只送 ah_val 0/1）
+    # H：切換定高（iNav ALTHOLD，只送 ah_val 0/1）
     curr_h = kb.is_pressed('h')
     if curr_h and not state['prev_h']:
-        state['alt_hold_active'] = not state['alt_hold_active']
         if not state['alt_hold_active']:
+            thr_raw = max(-1.0, min(1.0,
+                (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0)))
+            if abs(thr_raw) > 0.25:
+                print(f"\n⚠️ 油門未置中，請先置中再切 ALTHOLD 避免暴衝")
+            else:
+                state['alt_hold_active'] = True
+                print("\n🔒 定高開啟")
+        else:
             global _poshold_throttle
             _poshold_throttle = -1
-        print(f"\n{'🔒 定點定高開啟' if state['alt_hold_active'] else '🔓 定點定高關閉'}")
+            state['alt_hold_active'] = False
+            print("\n🔓 定高關閉")
     state['prev_h'] = curr_h
 
     if kb_triggered('tab'):   state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
