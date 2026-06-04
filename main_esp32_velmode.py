@@ -370,6 +370,7 @@ def read_gamepad(joystick, state):
             _flow_display.stop()
             state['arm_pending']         = False
             state['arm_state']           = 0
+            state['alt_hold_active']     = False
             state['flow_autotrim_pitch'] = 0.0
             state['flow_autotrim_roll']  = 0.0
     state['prev_tri'] = curr_tri
@@ -471,6 +472,7 @@ def read_keyboard(state):
             _flow_display.stop()
             state['arm_pending']         = False
             state['arm_state']           = 0
+            state['alt_hold_active']     = False
             state['flow_autotrim_pitch'] = 0.0
             state['flow_autotrim_roll']  = 0.0
     state['prev_r'] = curr_r
