@@ -248,17 +248,24 @@ def read_gamepad(joystick, state):
             state['is_exiting'] = False
             print("\n✅ 退出指令取消。")
 
-    # ○：切換定點定高（iNav ALTHOLD，只送 ah_val 0/1）
+    # ○：切換定高（iNav ALTHOLD，只送 ah_val 0/1）
     curr_circle = joystick.get_button(BTN_CIRCLE)
     if curr_circle and not state['prev_circle']:
         if not state['alt_hold_active']:
-            oy, ox, op, or_ = state['offset']
-            thr_raw = joystick.get_axis(1) - oy
-            if abs(thr_raw) > 0.25:
-                print(f"\n⚠️ 油門未置中（偏移 {thr_raw:+.2f}），請先置中再切 ALTHOLD 避免暴衝")
+            with _alt_lock:
+                cur_alt = _current_alt
+            in_air = cur_alt > 20.0  # 離地超過 20cm 才算在空中
+            if in_air:
+                oy, ox, op, or_ = state['offset']
+                thr_raw = joystick.get_axis(1) - oy
+                if abs(thr_raw) > 0.25:
+                    print(f"\n⚠️ 油門未置中（偏移 {thr_raw:+.2f}），請先置中再切 ALTHOLD 避免暴衝")
+                else:
+                    state['alt_hold_active'] = True
+                    print("\n🔒 定高開啟（空中切入）")
             else:
                 state['alt_hold_active'] = True
-                print("\n🔒 定高開啟")
+                print("\n🔒 定高開啟（地面待機）")
         else:
             global _poshold_throttle
             _poshold_throttle = -1
@@ -398,13 +405,20 @@ def read_keyboard(state):
     curr_h = kb.is_pressed('h')
     if curr_h and not state['prev_h']:
         if not state['alt_hold_active']:
-            thr_raw = max(-1.0, min(1.0,
-                (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0)))
-            if abs(thr_raw) > 0.25:
-                print(f"\n⚠️ 油門未置中，請先置中再切 ALTHOLD 避免暴衝")
+            with _alt_lock:
+                cur_alt = _current_alt
+            in_air = cur_alt > 20.0
+            if in_air:
+                thr_raw = max(-1.0, min(1.0,
+                    (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0)))
+                if abs(thr_raw) > 0.25:
+                    print(f"\n⚠️ 油門未置中，請先置中再切 ALTHOLD 避免暴衝")
+                else:
+                    state['alt_hold_active'] = True
+                    print("\n🔒 定高開啟（空中切入）")
             else:
                 state['alt_hold_active'] = True
-                print("\n🔒 定高開啟")
+                print("\n🔒 定高開啟（地面待機）")
         else:
             global _poshold_throttle
             _poshold_throttle = -1
