@@ -833,8 +833,6 @@ def _update_flow_autotrim(state):
     counts 先乘以高度換算成物理單位，使校正行為不隨飛行高度改變。"""
     if state['arm_state'] != 255:
         return
-    if state['alt_hold_active']:
-        return  # iNav POSHOLD 中由 FC 自己用光流定點；autotrim 此時會干擾 RC 指令
     if abs(state.get('stick_pitch', 0.0)) > 0.08 or abs(state.get('stick_roll', 0.0)) > 0.08:
         return
     now = time.time()
