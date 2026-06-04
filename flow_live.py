@@ -43,6 +43,8 @@ def _run_viewer() -> None:
     mags = deque()
     alts_t = deque()
     alts   = deque()
+    thrs_t = deque()
+    thrs   = deque()
     px = deque(maxlen=PATH_MAX_PTS)
     py = deque(maxlen=PATH_MAX_PTS)
     px.append(0.0); py.append(0.0)
@@ -71,11 +73,15 @@ def _run_viewer() -> None:
     ax_mag.set_ylabel('counts')
     ax_mag.grid(True, linestyle=':', alpha=0.4)
 
-    ln_alt, = ax_alt.plot([], [], color='#2196F3', linewidth=1.4)
-    ax_alt.set_title('高度')
+    ln_alt, = ax_alt.plot([], [], color='#2196F3', linewidth=1.4, label='高度')
+    ax_alt.set_title('高度 / 馬力')
     ax_alt.set_xlabel('時間 (s)')
-    ax_alt.set_ylabel('alt (cm)')
+    ax_alt.set_ylabel('alt (cm)', color='#2196F3')
     ax_alt.grid(True, linestyle=':', alpha=0.4)
+    ax_thr = ax_alt.twinx()
+    ln_thr, = ax_thr.plot([], [], color='#FF5722', linewidth=1.2, alpha=0.8, label='馬力')
+    ax_thr.set_ylabel('馬力 (μs)', color='#FF5722')
+    ax_thr.tick_params(axis='y', labelcolor='#FF5722')
 
     ln_path, = ax_path.plot([0], [0], color='#7B1FA2', linewidth=1.2)
     ax_path.plot([0], [0], 'go', markersize=7, label='起點')
@@ -101,9 +107,21 @@ def _run_viewer() -> None:
                 if parts[0] == 'reset':
                     ts.clear(); dxs.clear(); dys.clear(); mags.clear()
                     alts_t.clear(); alts.clear()
+                    thrs_t.clear(); thrs.clear()
                     px.clear(); py.clear(); px.append(0.0); py.append(0.0)
                     state['cx'] = state['cy'] = 0.0
                     state['t0'] = None
+                elif parts[0] == 'thr' and len(parts) == 3:
+                    try:
+                        t_abs = float(parts[1])
+                        thr_us = int(parts[2])
+                    except ValueError:
+                        pass
+                    else:
+                        if state['t0'] is None:
+                            state['t0'] = t_abs
+                        thrs_t.append(t_abs - state['t0'])
+                        thrs.append(thr_us)
                 elif parts[0] == 'of' and len(parts) == 5:
                     try:
                         t_abs  = float(parts[1])
@@ -136,10 +154,13 @@ def _run_viewer() -> None:
                     ts.popleft(); dxs.popleft(); dys.popleft(); mags.popleft()
                 while alts_t and alts_t[0] < cutoff:
                     alts_t.popleft(); alts.popleft()
+                while thrs_t and thrs_t[0] < ts[-1] - WINDOW_S:
+                    thrs_t.popleft(); thrs.popleft()
             ln_dx.set_data(list(ts), list(dxs))
             ln_dy.set_data(list(ts), list(dys))
             ln_mag.set_data(list(ts), list(mags))
             ln_alt.set_data(list(alts_t), list(alts))
+            ln_thr.set_data(list(thrs_t), list(thrs))
             ln_path.set_data(list(px), list(py))
             if px:
                 pt_now.set_data([px[-1]], [py[-1]])
@@ -147,11 +168,13 @@ def _run_viewer() -> None:
             xs_dxy = list(dxs) + list(dys)
             ys_mag = list(mags)
             ys_alt = list(alts)
+            ys_thr = list(thrs)
             x_hi   = ts[-1] if has_ts else 0.0
         if has_ts:
             x_lo = max(0.0, x_hi - WINDOW_S)
             for ax in (ax_dxy, ax_mag, ax_alt):
                 ax.set_xlim(x_lo, x_hi if x_hi > x_lo else x_lo + 1e-3)
+            ax_thr.set_xlim(x_lo, x_hi if x_hi > x_lo else x_lo + 1e-3)
         for ax, ys in ((ax_dxy, xs_dxy), (ax_mag, ys_mag), (ax_alt, ys_alt)):
             if ys:
                 lo, hi = min(ys), max(ys)
@@ -159,6 +182,12 @@ def _run_viewer() -> None:
                     lo -= 1; hi += 1
                 pad = (hi - lo) * 0.1
                 ax.set_ylim(lo - pad, hi + pad)
+        if ys_thr:
+            lo, hi = min(ys_thr), max(ys_thr)
+            if lo == hi:
+                lo -= 10; hi += 10
+            pad = (hi - lo) * 0.1
+            ax_thr.set_ylim(lo - pad, hi + pad)
         ax_path.relim(); ax_path.autoscale_view()
 
     plt.show(block=False)
@@ -247,6 +276,16 @@ def stop() -> None:
                 pass
         _proc  = None
         _stdin = None
+
+
+def record_thr(throttle_us: int) -> None:
+    if not _alive() or _stdin is None:
+        return
+    try:
+        _stdin.write(f"thr {time.time():.3f} {int(throttle_us)}\n")
+        _stdin.flush()
+    except Exception:
+        pass
 
 
 def record(dx: int, dy: int, alt_mm: float) -> None:
