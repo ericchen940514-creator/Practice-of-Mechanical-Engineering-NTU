@@ -677,6 +677,7 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
         cur_alt = _current_alt
 
     alt_str = f"{cur_alt:.1f} cm" if cur_alt >= 0 else "---"
+    motor_str = f"馬力均值: {_poshold_throttle} μs" if _poshold_throttle >= 0 else "馬力均值: ---"
 
     if state['alt_hold_active']:
         vel_str = "定點定高中"
@@ -694,6 +695,7 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
         (f"定點定高: {'開啟' if state['alt_hold_active'] else '關閉'}", ah_color),
         (throttle_str, (200, 200, 200)),
         (f"高度: {alt_str}", (255, 220, 60)),
+        (motor_str, (255, 160, 80)),
         (f"Y:{channels['yaw']:3d}  P:{channels['pitch']:3d}  R:{channels['roll']:3d}  夾:{state['gripper_val']:3d}",
          (180, 180, 180)),
         (f"自動Trim  P:{state['flow_autotrim_pitch']:+.3f}  R:{state['flow_autotrim_roll']:+.3f}",
