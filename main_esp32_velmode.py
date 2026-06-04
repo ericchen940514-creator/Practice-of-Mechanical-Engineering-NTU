@@ -514,14 +514,15 @@ class EmbeddedFlowDisplay:
         dpi = 100
         self.fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi,
                               facecolor='#141414')
-        self.fig.subplots_adjust(left=0.10, right=0.97, top=0.94, bottom=0.08,
-                                 hspace=0.52, wspace=0.38)
-        ax_dxy  = self.fig.add_subplot(2, 2, 1)
-        ax_mag  = self.fig.add_subplot(2, 2, 2)
-        ax_alt  = self.fig.add_subplot(2, 2, 3)
-        ax_path = self.fig.add_subplot(2, 2, 4)
+        gs = self.fig.add_gridspec(3, 2, left=0.10, right=0.97, top=0.94, bottom=0.06,
+                                   hspace=0.55, wspace=0.38)
+        ax_dxy  = self.fig.add_subplot(gs[0, 0])
+        ax_mag  = self.fig.add_subplot(gs[0, 1])
+        ax_alt  = self.fig.add_subplot(gs[1, 0])
+        ax_path = self.fig.add_subplot(gs[1, 1])
+        ax_mtr  = self.fig.add_subplot(gs[2, :])   # 馬力圖橫跨兩欄
 
-        for ax in (ax_dxy, ax_mag, ax_alt, ax_path):
+        for ax in (ax_dxy, ax_mag, ax_alt, ax_path, ax_mtr):
             ax.set_facecolor('#1a1a2e')
             ax.tick_params(colors='#aaa', labelsize=8)
             for sp in ax.spines.values():
@@ -558,7 +559,15 @@ class EmbeddedFlowDisplay:
         ax_path.set_aspect('equal', adjustable='datalim')
         ax_path.grid(True, ls=':', alpha=0.3, color='#555')
 
-        self.ax_dxy, self.ax_mag, self.ax_alt, self.ax_path = ax_dxy, ax_mag, ax_alt, ax_path
+        self.ln_thr, = ax_mtr.plot([], [], color='#FF5722', lw=1.4)
+        ax_mtr.set_title('FC 平均馬力', fontsize=9)
+        ax_mtr.set_xlabel('時間 (s)', fontsize=8)
+        ax_mtr.set_ylabel('μs', fontsize=8)
+        ax_mtr.axhline(1500, color='#555', lw=0.8, ls='--')
+        ax_mtr.grid(True, ls=':', alpha=0.3, color='#555')
+
+        self.ax_dxy, self.ax_mag, self.ax_alt, self.ax_path, self.ax_mtr = \
+            ax_dxy, ax_mag, ax_alt, ax_path, ax_mtr
 
         self._lock   = threading.Lock()
         self._ts     = deque()
@@ -567,6 +576,8 @@ class EmbeddedFlowDisplay:
         self._mags   = deque()
         self._alts_t = deque()
         self._alts   = deque()
+        self._thrs_t = deque()
+        self._thrs   = deque()
         self._px     = deque(maxlen=self.PATH_MAX_PTS)
         self._py     = deque(maxlen=self.PATH_MAX_PTS)
         self._px.append(0.0); self._py.append(0.0)
@@ -584,7 +595,8 @@ class EmbeddedFlowDisplay:
             self._cx = self._cy = 0.0
             self._t0 = None
             for q in (self._ts, self._dxs, self._dys, self._mags,
-                      self._alts_t, self._alts, self._px, self._py):
+                      self._alts_t, self._alts, self._thrs_t, self._thrs,
+                      self._px, self._py):
                 q.clear()
             self._px.append(0.0); self._py.append(0.0)
 
@@ -618,6 +630,14 @@ class EmbeddedFlowDisplay:
             self._alts_t.append(tr)
             self._alts.append(alt_cm)
 
+    def record_thr(self, throttle_us: int) -> None:
+        with self._lock:
+            t = time.time()
+            if self._t0 is None:
+                self._t0 = t
+            self._thrs_t.append(t - self._t0)
+            self._thrs.append(throttle_us)
+
     def _render(self) -> None:
         with self._lock:
             if self._ts:
@@ -627,30 +647,42 @@ class EmbeddedFlowDisplay:
                     self._dys.popleft(); self._mags.popleft()
                 while self._alts_t and self._alts_t[0] < cut:
                     self._alts_t.popleft(); self._alts.popleft()
+                while self._thrs_t and self._thrs_t[0] < cut:
+                    self._thrs_t.popleft(); self._thrs.popleft()
             ts     = list(self._ts);     dxs    = list(self._dxs)
             dys    = list(self._dys);    mags   = list(self._mags)
             alts_t = list(self._alts_t); alts   = list(self._alts)
+            thrs_t = list(self._thrs_t); thrs   = list(self._thrs)
             px     = list(self._px);     py     = list(self._py)
 
         self.ln_dx.set_data(ts, dxs)
         self.ln_dy.set_data(ts, dys)
         self.ln_mag.set_data(ts, mags)
         self.ln_alt.set_data(alts_t, alts)
+        self.ln_thr.set_data(thrs_t, thrs)
         self.ln_path.set_data(px, py)
+
         if px:
             self.pt_now.set_data([px[-1]], [py[-1]])
 
         if ts:
             xhi = ts[-1]; xlo = max(0.0, xhi - self.WINDOW_S)
-            for ax in (self.ax_dxy, self.ax_mag, self.ax_alt):
+            for ax in (self.ax_dxy, self.ax_mag, self.ax_alt, self.ax_mtr):
                 ax.set_xlim(xlo, xhi if xhi > xlo else xlo + 1e-3)
-        for ax, ys in ((self.ax_dxy, dxs + dys), (self.ax_mag, mags), (self.ax_alt, alts)):
+        for ax, ys in ((self.ax_dxy, dxs + dys), (self.ax_mag, mags),
+                       (self.ax_alt, alts)):
             if ys:
                 lo, hi = min(ys), max(ys)
                 if lo == hi:
                     lo -= 1; hi += 1
                 pad = (hi - lo) * 0.1
                 ax.set_ylim(lo - pad, hi + pad)
+        if thrs:
+            lo, hi = min(thrs), max(thrs)
+            if lo == hi:
+                lo -= 10; hi += 10
+            pad = (hi - lo) * 0.1
+            self.ax_mtr.set_ylim(lo - pad, hi + pad)
         self.ax_path.relim(); self.ax_path.autoscale_view()
 
         self.fig.canvas.draw()
