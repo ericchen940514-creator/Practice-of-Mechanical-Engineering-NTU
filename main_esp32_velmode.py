@@ -262,9 +262,11 @@ def read_gamepad(joystick, state):
                     print(f"\n⚠️ 油門未置中（偏移 {thr_raw:+.2f}），請先置中再切 ALTHOLD 避免暴衝")
                 else:
                     state['alt_hold_active'] = True
+                    state['base_throttle'] = 127
                     print("\n🔒 定高開啟（空中切入）")
             else:
                 state['alt_hold_active'] = True
+                state['base_throttle'] = 127
                 print("\n🔒 定高開啟（地面待機）")
         else:
             global _poshold_throttle
@@ -415,9 +417,11 @@ def read_keyboard(state):
                     print(f"\n⚠️ 油門未置中，請先置中再切 ALTHOLD 避免暴衝")
                 else:
                     state['alt_hold_active'] = True
+                    state['base_throttle'] = 127
                     print("\n🔒 定高開啟（空中切入）")
             else:
                 state['alt_hold_active'] = True
+                state['base_throttle'] = 127
                 print("\n🔒 定高開啟（地面待機）")
         else:
             global _poshold_throttle
