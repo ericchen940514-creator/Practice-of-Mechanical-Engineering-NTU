@@ -49,20 +49,30 @@ uint16_t ibus_channels[14] = {
 unsigned long last_ibus_time = 0;
 
 // -------------------- Control State --------------------
-bool alt_hold_ch7 = false;   // CH7 狀態（由 ah_val 控制）
+bool alt_hold_ch7 = false;
 int  prev_ah_val  = 0;
+int  manual_throttle = 1500;
 
-// 退出定高時先同步油門再切 CH7/CH8
-enum SyncState { SYNC_IDLE, SYNC_WAITING };
-SyncState     sync_state      = SYNC_IDLE;
-unsigned long sync_request_t  = 0;
+// ─── ESP32 速度模式定高 PID（從 sketch_althold_v6_velmode 移植）───
+bool  alt_hold_pid     = false;
+float received_vel_cmd = 0.0f;
+float v_est            = 0.0f;
+float integral_vel     = 0.0f;
+float last_vel_error   = 0.0f;
+float prev_cm_filt_pid = -1.0f;
+float prev_cm_raw_pid  = -1.0f;
+int   hover_estimate   = 1500;
+unsigned long last_pid_time = 0;
 
-// 定點定高中持續回報 FC 油門
-enum ThrQueryState { THR_IDLE, THR_WAITING };
-ThrQueryState thr_state       = THR_IDLE;
-unsigned long thr_request_t   = 0;
-unsigned long last_thr_query_t = 0;
-const unsigned long THR_QUERY_INTERVAL_MS = 200;
+const float Kp_vel           = 0.80f;
+const float Ki_vel           = 1.20f;
+const float Kd_vel           = 0.0f;
+const float MAX_VEL_CMD      = 60.0f;
+const float MAX_INTEGRAL_VEL = 220.0f;
+const float MAX_THR_OFFSET   = 220.0f;
+const float GAMMA            = 0.20f;
+const float MAX_ALT_CM_PID   = 250.0f;
+const int   MAX_THR_STEP_PID = 20;
 
 // -------------------- Sensor State --------------------
 bool  sensor_ok          = false;
@@ -218,6 +228,52 @@ bool resetFlowSensor() {
     return flowSensor.begin();
 }
 
+void updateAltHold(float filt_mm) {
+    unsigned long now = millis();
+    float dt = (now - last_pid_time) / 1000.0f;
+    if (dt < 0.02f) return;
+    last_pid_time = now;
+
+    if (filt_mm < 0) return;
+    float current_cm = filt_mm / 10.0f;
+    if (current_cm > MAX_ALT_CM_PID) return;
+
+    if (prev_cm_raw_pid > 0 && fabs(current_cm - prev_cm_raw_pid) > 15.0f) {
+        prev_cm_raw_pid  = current_cm;
+        prev_cm_filt_pid = current_cm;
+        v_est = 0;
+        return;
+    }
+    prev_cm_raw_pid = current_cm;
+
+    float safe_vel_cmd = constrain(received_vel_cmd, -MAX_VEL_CMD, MAX_VEL_CMD);
+
+    if (prev_cm_filt_pid < 0) prev_cm_filt_pid = current_cm;
+    float v_raw = constrain((current_cm - prev_cm_filt_pid) / dt, -100.0f, 100.0f);
+    v_est = GAMMA * v_raw + (1.0f - GAMMA) * v_est;
+    prev_cm_filt_pid = current_cm;
+
+    float vel_error = safe_vel_cmd - v_est;
+    float d_vel = (vel_error - last_vel_error) / dt;
+    last_vel_error = vel_error;
+
+    float tentative = Kp_vel * vel_error + Ki_vel * integral_vel + Kd_vel * d_vel;
+    if (fabs(tentative) < MAX_THR_OFFSET * 0.85f) {
+        integral_vel += vel_error * dt;
+    } else if (vel_error * integral_vel > 0) {
+        integral_vel *= 0.92f;
+    }
+    integral_vel = constrain(integral_vel, -MAX_INTEGRAL_VEL, MAX_INTEGRAL_VEL);
+
+    float thr_offset = Kp_vel * vel_error + Ki_vel * integral_vel + Kd_vel * d_vel;
+    thr_offset = constrain(thr_offset, -MAX_THR_OFFSET, MAX_THR_OFFSET);
+
+    int desired = constrain(hover_estimate + (int)thr_offset, 1100, 1800);
+    ibus_channels[2] = constrain(desired,
+                                 (int)ibus_channels[2] - MAX_THR_STEP_PID,
+                                 (int)ibus_channels[2] + MAX_THR_STEP_PID);
+}
+
 void sendIBUS() {
     uint8_t packet[32];
     packet[0] = 0x20;
@@ -310,39 +366,12 @@ void loop() {
         }
     }
 
-    // ── 定點定高：週期性回報 FC 油門 ──
-    if (alt_hold_ch7 && sync_state == SYNC_IDLE) {
-        if (thr_state == THR_IDLE && millis() - last_thr_query_t >= THR_QUERY_INTERVAL_MS) {
-            requestMSPMotor();
-            thr_state      = THR_WAITING;
-            thr_request_t  = millis();
-        }
-        if (thr_state == THR_WAITING) {
-            uint16_t motors[4];
-            bool got      = readMSPMotorResponse(motors);
-            bool thr_tout = (millis() - thr_request_t > 100);
-            if (got || thr_tout) {
-                if (got) {
-                    char dbg[48];
-                    snprintf(dbg, sizeof(dbg), "DBG:M%d,%d,%d,%d\n",
-                             motors[0], motors[1], motors[2], motors[3]);
-                    SerialBT.print(dbg);
-                    long sum = 0; int cnt = 0;
-                    for (int i = 0; i < 4; i++) {
-                        if (motors[i] >= 1000 && motors[i] <= 2000) { sum += motors[i]; cnt++; }
-                    }
-                    if (cnt > 0) {
-                        char hbuf[16];
-                        snprintf(hbuf, sizeof(hbuf), "THR:%d\n", (int)(sum / cnt));
-                        SerialBT.print(hbuf);
-                    }
-                } else {
-                    SerialBT.print("DBG:THR_TOUT\n");
-                }
-                thr_state       = THR_IDLE;
-                last_thr_query_t = millis();
-            }
-        }
+    // ── 定高中週期性回報 ESP32 PID 油門 ──
+    if (alt_hold_pid && millis() - last_thr_query_t >= THR_QUERY_INTERVAL_MS) {
+        char hbuf[16];
+        snprintf(hbuf, sizeof(hbuf), "THR:%d\n", (int)ibus_channels[2]);
+        SerialBT.print(hbuf);
+        last_thr_query_t = millis();
     }
 
     // ── BT Packet Parsing ──
@@ -369,28 +398,48 @@ void loop() {
 
             ibus_channels[0] = map(r_val,   0, 255, 1000, 2000);
             ibus_channels[1] = map(p_val,   0, 255, 1000, 2000);
-            if (sync_state == SYNC_IDLE)
-                ibus_channels[2] = map(thr_val, 0, 255, 1000, 2000);
             ibus_channels[3] = map(y_val,   0, 255, 1000, 2000);
             ibus_channels[4] = map(arm_val, 0, 255, 1000, 2000);
             ibus_channels[5] = 2000;
+            ibus_channels[6] = 1000;  // CH7：不使用 iNav ALTHOLD
+            ibus_channels[7] = 1000;  // CH8：不使用 iNav POSHOLD
 
-            // 偵測 1→0（退出定點定高）：先發 MSP_MOTOR 請求，CH7/CH8 暫時保持高
-            if (prev_ah_val == 1 && ah_val == 0 && sync_state == SYNC_IDLE) {
-                // 清掉可能殘留的 THR query response，避免 SYNC 吃到過時資料
-                while (Serial1.available()) Serial1.read();
-                requestMSPMotor();
-                sync_state       = SYNC_WAITING;
-                sync_request_t   = millis();
-                thr_state        = THR_IDLE;  // 取消定點輪詢
-                ibus_channels[6] = 2000;      // 等同步完再切
-                ibus_channels[7] = 2000;
-            } else if (sync_state == SYNC_IDLE) {
-                ibus_channels[6] = (ah_val == 1) ? 2000 : 1000;  // ALTHOLD
-                ibus_channels[7] = (ah_val == 1) ? 2000 : 1000;  // POSHOLD
+            if (!alt_hold_pid) {
+                // 手動模式：Python 直接控制油門
+                manual_throttle  = map(thr_val, 0, 255, 1000, 2000);
+                ibus_channels[2] = manual_throttle;
+            } else {
+                // 定高模式：ESP32 PID 控制油門，接收速度指令
+                received_vel_cmd = constrain((float)(alt_val - 128), -MAX_VEL_CMD, MAX_VEL_CMD);
             }
+
+            // 切入定高
+            if (ah_val == 1 && !alt_hold_pid && sensor_ok) {
+                integral_vel     = 0;
+                last_vel_error   = 0;
+                v_est            = 0;
+                prev_cm_filt_pid = -1;
+                prev_cm_raw_pid  = -1;
+                received_vel_cmd = 0;
+                last_pid_time    = millis();
+                hover_estimate   = (manual_throttle >= 1250) ? manual_throttle : 1500;
+                alt_hold_pid     = true;
+                SerialBT.print("AH:1\n");
+            }
+            // 退出定高
+            if (ah_val == 0 && alt_hold_pid) {
+                int exit_thr     = ibus_channels[2];
+                alt_hold_pid     = false;
+                manual_throttle  = exit_thr;
+                ibus_channels[2] = exit_thr;
+                char tbuf[16];
+                snprintf(tbuf, sizeof(tbuf), "T:%d\n", exit_thr);
+                SerialBT.print(tbuf);
+                SerialBT.print("AH:0\n");
+            }
+
             prev_ah_val  = ah_val;
-            alt_hold_ch7 = (ah_val == 1);
+            alt_hold_ch7 = alt_hold_pid;
             gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
         }
     }
@@ -473,6 +522,11 @@ void loop() {
 
         accum_dx += dx;
         accum_dy += dy;
+    }
+
+    // ── ESP32 定高 PID ──
+    if (alt_hold_pid && sensor_ok) {
+        updateAltHold(filtered_mm);
     }
 
     // ── BT Altitude Telemetry ──

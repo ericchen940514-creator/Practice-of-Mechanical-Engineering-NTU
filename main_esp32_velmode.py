@@ -354,6 +354,12 @@ def read_gamepad(joystick, state):
     alt_byte = 128
     if state['arm_pending']:
         final_throttle = 0
+    elif state['alt_hold_active']:
+        # 定高模式：ESP32 PID 控制油門，Python 送速度指令
+        raw_throttle_vel = apply_dead_zone(-raw_throttle)
+        vel_cmd  = raw_throttle_vel * ALT_VEL_SCALE
+        alt_byte = encode_vel(vel_cmd)
+        final_throttle = state['base_throttle']  # ESP32 忽略此值，維持固定
     else:
         final_throttle = max(0, min(255,
             state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
@@ -456,6 +462,11 @@ def read_keyboard(state):
     alt_byte = 128
     if state['arm_pending']:
         final_throttle = 0
+    elif state['alt_hold_active']:
+        raw_throttle_vel = apply_dead_zone(-raw_throttle)
+        vel_cmd  = raw_throttle_vel * ALT_VEL_SCALE
+        alt_byte = encode_vel(vel_cmd)
+        final_throttle = state['base_throttle']
     else:
         final_throttle = max(0, min(255,
             state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
