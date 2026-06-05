@@ -72,16 +72,22 @@ BTN_ESTOP_A = 4
 BTN_ESTOP_B = 6
 BTN_CALIB   = 15   # 右搖桿偏移補正（原 X 鍵，改到 15 防誤觸）
 
-# ── 光流自動 Trim ──
-FLOW_AUTOTRIM_GAIN     = 0.008    # trim 基礎增益（trim/normalized_unit/s）
+# ── 光流自動 Trim（I 項：慢速積分，修正靜態偏差）──
+FLOW_AUTOTRIM_GAIN     = 0.015    # trim 基礎增益（trim/normalized_unit/s）
 FLOW_AUTOTRIM_BOOST    = 0.15     # 非線性加速係數；有效增益 = GAIN×(1+BOOST×|error|)
-FLOW_AUTOTRIM_DEADZONE = 1.0      # 物理單位 cm 等效，低於此值不積分
-FLOW_AUTOTRIM_MAX      = 0.35     # 自動 trim 上限（±，在 trim ±1 空間）
-FLOW_AUTOTRIM_WINDOW_S = 0.6      # 平均窗口（秒）
+FLOW_AUTOTRIM_DEADZONE = 0.5      # 物理單位 cm 等效，低於此值不積分
+FLOW_AUTOTRIM_MAX      = 0.50     # 自動 trim 上限（±，在 trim ±1 空間）
+FLOW_AUTOTRIM_WINDOW_S = 1.0      # 平均窗口（秒）；拉長讓積分更穩定
 FLOW_AUTOTRIM_STICK_FREEZE = 0.10 # 搖桿超過此值時凍結 autotrim，允許主動移動
 FLOW_PITCH_SIGN        = +1       # dy → pitch 補正方向；飄移方向反向時改 -1
 FLOW_ROLL_SIGN         = +1       # dx → roll  補正方向；飄移方向反向時改 -1
 _FLOW_COUNTS_TO_RAD    = 0.01     # PMW3901 每 count 對應的視角（rad），與 flow_live 一致
+
+# ── 光流即時補正（P 項：對抗快速飄移）──
+FLOW_P_GAIN     = 0.10   # 比例增益；過大會震盪，建議從 0.08 開始調
+FLOW_P_WINDOW_S = 0.15   # 短窗口（秒），反應快速飄移
+FLOW_P_MAX      = 0.25   # P 項上限（±0.25 → 約 ±37μs 補正）
+FLOW_P_DEADZONE = 0.3    # P 項死區（比 I 項小，對小飄移也反應）
 
 # ==========================================
 # 藍牙工具
@@ -272,7 +278,9 @@ def read_gamepad(joystick, state):
         else:
             global _poshold_throttle
             _poshold_throttle = -1
-            state['alt_hold_active'] = False
+            state['alt_hold_active']    = False
+            state['syncing_throttle']   = True
+            state['syncing_throttle_t'] = time.time()
             print("\n🔓 定高關閉")
     state['prev_circle'] = curr_circle
 
@@ -339,8 +347,8 @@ def read_gamepad(joystick, state):
     trim_pitch, trim_roll = state['right_stick_trim']
     auto_p = state['flow_autotrim_pitch']
     auto_r = state['flow_autotrim_roll']
-    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch + auto_p))
-    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll  + auto_r))
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch + auto_p + state['flow_p_pitch']))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll  + auto_r + state['flow_p_roll']))
 
     # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -361,6 +369,8 @@ def read_gamepad(joystick, state):
         vel_cmd  = raw_throttle_vel * ALT_VEL_SCALE
         alt_byte = encode_vel(vel_cmd)
         final_throttle = state['base_throttle']  # ESP32 忽略此值，維持固定
+    elif state['syncing_throttle']:
+        final_throttle = state['base_throttle']  # 等待 T: 同步，凍結油門桿
     else:
         final_throttle = max(0, min(255,
             state['base_throttle'] + int(round(-raw_throttle * JOYSTICK_SENSITIVITY))))
@@ -380,6 +390,8 @@ def read_gamepad(joystick, state):
             state['alt_hold_active']     = False
             state['flow_autotrim_pitch'] = 0.0
             state['flow_autotrim_roll']  = 0.0
+            state['flow_p_pitch']        = 0.0
+            state['flow_p_roll']         = 0.0
     state['prev_tri'] = curr_tri
 
     if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -434,14 +446,17 @@ def read_keyboard(state):
         else:
             global _poshold_throttle
             _poshold_throttle = -1
-            state['alt_hold_active'] = False
+            state['alt_hold_active']    = False
+            state['syncing_throttle']   = True
+            state['syncing_throttle_t'] = time.time()
             print("\n🔓 定高關閉")
     state['prev_h'] = curr_h
 
-    if kb_triggered('tab'):   state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
-    if kb_triggered('shift'): state['base_throttle'] = max(0,   state['base_throttle'] - state['throttle_step'])
-    if kb_triggered('c'):     state['throttle_step'] = min(20, state['throttle_step'] + 1)
-    if kb_triggered('z'):     state['throttle_step'] = max(1,  state['throttle_step'] - 1)
+    if not state['alt_hold_active']:
+        if kb_triggered('tab'):   state['base_throttle'] = min(255, state['base_throttle'] + state['throttle_step'])
+        if kb_triggered('shift'): state['base_throttle'] = max(0,   state['base_throttle'] - state['throttle_step'])
+        if kb_triggered('c'):     state['throttle_step'] = min(20, state['throttle_step'] + 1)
+        if kb_triggered('z'):     state['throttle_step'] = max(1,  state['throttle_step'] - 1)
 
     raw_throttle = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('w') else 0.0) + (1.0 if kb.is_pressed('s') else 0.0))), THROTTLE_EXPO)
     raw_yaw      = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('a') else 0.0) + (1.0 if kb.is_pressed('d') else 0.0))), YAW_EXPO)
@@ -449,14 +464,16 @@ def read_keyboard(state):
     raw_roll     = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left') else 0.0) + (1.0 if kb.is_pressed('right') else 0.0))), TILT_EXPO)
     state['stick_pitch'] = raw_pitch
     state['stick_roll']  = raw_roll
-    raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch']))
-    raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']))
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch'] + state['flow_p_pitch']))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']  + state['flow_p_roll']))
 
     # 解鎖序列
     if state['arm_pending'] and not state['alt_hold_active']:
         if time.time() - state['arm_pending_t'] >= 0.25:
             state['arm_pending']    = False
             state['arm_state']      = 255
+            flow_logger.start()
+            _flow_display.start()
             print("\n✅ 解鎖！")
 
     vel_cmd  = 0
@@ -467,6 +484,8 @@ def read_keyboard(state):
         raw_throttle_vel = apply_dead_zone(-raw_throttle)
         vel_cmd  = raw_throttle_vel * ALT_VEL_SCALE
         alt_byte = encode_vel(vel_cmd)
+        final_throttle = state['base_throttle']
+    elif state['syncing_throttle']:
         final_throttle = state['base_throttle']
     else:
         final_throttle = max(0, min(255,
@@ -487,6 +506,8 @@ def read_keyboard(state):
             state['alt_hold_active']     = False
             state['flow_autotrim_pitch'] = 0.0
             state['flow_autotrim_roll']  = 0.0
+            state['flow_p_pitch']        = 0.0
+            state['flow_p_roll']         = 0.0
     state['prev_r'] = curr_r
 
     if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
@@ -742,7 +763,8 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
         (motor_str, (255, 160, 80)),
         (f"Y:{channels['yaw']:3d}  P:{channels['pitch']:3d}  R:{channels['roll']:3d}  夾:{state['gripper_val']:3d}",
          (180, 180, 180)),
-        (f"自動Trim  P:{state['flow_autotrim_pitch']:+.3f}  R:{state['flow_autotrim_roll']:+.3f}",
+        (f"I-Trim P:{state['flow_autotrim_pitch']:+.3f} R:{state['flow_autotrim_roll']:+.3f}  "
+         f"P-Flow P:{state['flow_p_pitch']:+.3f} R:{state['flow_p_roll']:+.3f}",
          (100, 200, 120)),
         (f"COM: {COM_PORT}", (120, 120, 120)),
     ]
@@ -759,7 +781,7 @@ def draw_status(screen, font, font_small, state, mode, channels, connected):
         ("操作說明", (160, 160, 160)),
         ("○/H  定點定高切換", (110, 110, 110)),
         ("△/R  解鎖 / 上鎖", (110, 110, 110)),
-        ("□/F  積分重設", (110, 110, 110)),
+        ("□  搖桿校準", (110, 110, 110)),
         ("D-pad↑↓  基準油門", (110, 110, 110)),
         ("Options/X (3s)  退出", (110, 110, 110)),
         ("4+6  緊急停機", (180, 80, 80)),
@@ -809,20 +831,20 @@ state = {
     'is_exiting':     False,
     'exit_press_time': 0,
     'alt_hold_active':  False,
-    'last_alt_update_t': 0.0,
     'offset':     (0.0, 0.0, 0.0, 0.0),
     'right_stick_trim': (0.0, 0.0),
     'right_stick_recenter_required': False,
     'prev_sq':    0, 'prev_tri': 0, 'prev_circle': 0, 'prev_calib': 0,
     'prev_up':    0, 'prev_down': 0, 'prev_left': 0, 'prev_right': 0,
-    'reref_pending': False,
-    'prev_r': False, 'prev_h': False, 'prev_f': False,
+    'prev_r': False, 'prev_h': False,
     'syncing_throttle': False,  # 退出定高後等 T: 同步完成前凍結手動油門
     'syncing_throttle_t': 0.0,  # syncing 開始時間，逾時自動解除
     'arm_pending': False,        # 解鎖序列：先送 0 油門讓 Betaflight 接受，再跳 60
     'arm_pending_t': 0.0,
     'flow_autotrim_pitch': 0.0,
     'flow_autotrim_roll':  0.0,
+    'flow_p_pitch': 0.0,
+    'flow_p_roll':  0.0,
     'stick_pitch': 0.0,
     'stick_roll':  0.0,
 }
@@ -846,8 +868,9 @@ _alt_last_accepted  = -1.0
 _alt_last_accept_t  =  0.0
 _poshold_throttle   = -1   # FC 回報的平均馬達值（定點定高中）
 
-_flow_buf_lock = threading.Lock()
-_flow_buf      = deque()  # (t, dx, dy)
+_flow_buf_lock    = threading.Lock()
+_flow_buf         = deque()  # (t, dx, dy)
+_autotrim_last_t  = 0.0
 
 def get_alt_snapshot():
     with _alt_lock:
@@ -900,51 +923,85 @@ def _handle_bt_line(line):
                 state['syncing_throttle'] = False
             if was_syncing:
                 print(f"\n✅ 基準油門已同步：{new_base}")
-        elif line.startswith('F:2'):
+        elif line == 'F:1':
             with _state_lock:
                 if state['alt_hold_active']:
                     state['alt_hold_active']    = False
                     state['syncing_throttle']   = True
                     state['syncing_throttle_t'] = time.time()
             pid_logger.stop()
-            print("\n⚠️ 感測器逾時，定高已被 ESP32 強制關閉！")
+            print("\n⚠️ 感測器凍結，定高已強制關閉！")
+        elif line == 'F:0':
+            print("\n✅ 感測器讀值恢復正常")
     except (ValueError, UnicodeDecodeError):
         pass
 
 def _update_flow_autotrim(state):
+    global _autotrim_last_t
     if state['arm_state'] != 255:
+        state['flow_p_pitch'] = 0.0
+        state['flow_p_roll']  = 0.0
         return
-    if abs(state.get('stick_pitch', 0.0)) > 0.08 or abs(state.get('stick_roll', 0.0)) > 0.08:
-        return
+
+    stick_frozen = (abs(state.get('stick_pitch', 0.0)) > FLOW_AUTOTRIM_STICK_FREEZE or
+                    abs(state.get('stick_roll',  0.0)) > FLOW_AUTOTRIM_STICK_FREEZE)
+
     now = time.time()
-    cutoff = now - FLOW_AUTOTRIM_WINDOW_S
+    dt = now - _autotrim_last_t if _autotrim_last_t > 0 else 0.04
+    _autotrim_last_t = now
+    dt = min(dt, 0.12)
+
+    # 清除超過 I 項窗口的舊資料
+    i_cutoff = now - FLOW_AUTOTRIM_WINDOW_S
     with _flow_buf_lock:
-        while _flow_buf and _flow_buf[0][0] < cutoff:
+        while _flow_buf and _flow_buf[0][0] < i_cutoff:
             _flow_buf.popleft()
-        if len(_flow_buf) < 4:
+        if len(_flow_buf) < 2:
+            state['flow_p_pitch'] = 0.0
+            state['flow_p_roll']  = 0.0
             return
-        mean_dx = sum(v[1] for v in _flow_buf) / len(_flow_buf)
-        mean_dy = sum(v[2] for v in _flow_buf) / len(_flow_buf)
+        all_samples = list(_flow_buf)
+
     with _alt_lock:
         alt_cm = _current_alt
     alt_cm = max(alt_cm, 20.0)
-    norm_dx = mean_dx * alt_cm * _FLOW_COUNTS_TO_RAD
-    norm_dy = mean_dy * alt_cm * _FLOW_COUNTS_TO_RAD
-    dt = 0.04
-    # 搖桿有輸入時凍結 autotrim，讓使用者可以主動移動
-    if (abs(state['stick_pitch']) > FLOW_AUTOTRIM_STICK_FREEZE or
-            abs(state['stick_roll']) > FLOW_AUTOTRIM_STICK_FREEZE):
+
+    if stick_frozen:
+        # 搖桿有輸入：P 項清零（避免和主動操控打架），I 項凍結不積分
+        state['flow_p_pitch'] = 0.0
+        state['flow_p_roll']  = 0.0
         return
-    if abs(norm_dx) > FLOW_AUTOTRIM_DEADZONE:
-        gain_r = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dx))
-        delta = -FLOW_ROLL_SIGN * norm_dx * gain_r * dt
-        state['flow_autotrim_roll'] = max(-FLOW_AUTOTRIM_MAX,
-            min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_roll'] + delta))
-    if abs(norm_dy) > FLOW_AUTOTRIM_DEADZONE:
-        gain_p = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dy))
-        delta = -FLOW_PITCH_SIGN * norm_dy * gain_p * dt
-        state['flow_autotrim_pitch'] = max(-FLOW_AUTOTRIM_MAX,
-            min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_pitch'] + delta))
+
+    # ── P 項：短窗口平均，直接比例補正（對抗快速飄移）──
+    p_cutoff  = now - FLOW_P_WINDOW_S
+    p_samples = [v for v in all_samples if v[0] >= p_cutoff]
+    if len(p_samples) >= 2:
+        mean_dx_p = sum(v[1] for v in p_samples) / len(p_samples)
+        mean_dy_p = sum(v[2] for v in p_samples) / len(p_samples)
+        norm_dx_p = mean_dx_p * alt_cm * _FLOW_COUNTS_TO_RAD
+        norm_dy_p = mean_dy_p * alt_cm * _FLOW_COUNTS_TO_RAD
+        p_r = (-FLOW_ROLL_SIGN  * norm_dx_p * FLOW_P_GAIN) if abs(norm_dx_p) > FLOW_P_DEADZONE else 0.0
+        p_p = (-FLOW_PITCH_SIGN * norm_dy_p * FLOW_P_GAIN) if abs(norm_dy_p) > FLOW_P_DEADZONE else 0.0
+        state['flow_p_roll']  = max(-FLOW_P_MAX, min(FLOW_P_MAX, p_r))
+        state['flow_p_pitch'] = max(-FLOW_P_MAX, min(FLOW_P_MAX, p_p))
+    else:
+        state['flow_p_pitch'] = 0.0
+        state['flow_p_roll']  = 0.0
+
+    # ── I 項：長窗口平均，慢速積分（修正靜態偏差）──
+    if len(all_samples) >= 4:
+        mean_dx = sum(v[1] for v in all_samples) / len(all_samples)
+        mean_dy = sum(v[2] for v in all_samples) / len(all_samples)
+        norm_dx = mean_dx * alt_cm * _FLOW_COUNTS_TO_RAD
+        norm_dy = mean_dy * alt_cm * _FLOW_COUNTS_TO_RAD
+        if abs(norm_dx) > FLOW_AUTOTRIM_DEADZONE:
+            gain_r = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dx))
+            state['flow_autotrim_roll'] = max(-FLOW_AUTOTRIM_MAX,
+                min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_roll'] - FLOW_ROLL_SIGN * norm_dx * gain_r * dt))
+        if abs(norm_dy) > FLOW_AUTOTRIM_DEADZONE:
+            gain_p = FLOW_AUTOTRIM_GAIN * (1.0 + FLOW_AUTOTRIM_BOOST * abs(norm_dy))
+            state['flow_autotrim_pitch'] = max(-FLOW_AUTOTRIM_MAX,
+                min(FLOW_AUTOTRIM_MAX, state['flow_autotrim_pitch'] - FLOW_PITCH_SIGN * norm_dy * gain_p * dt))
 
 
 def _serial_reader():
@@ -989,7 +1046,7 @@ threading.Thread(target=_serial_reader, daemon=True).start()
 
 if mode == 'gamepad':
     print("\n🎮 手把模式（定點定高）")
-    print("△=解鎖/上鎖  ○=定點定高切換  □=積分重設  15=右搖桿偏移補正")
+    print("△=解鎖/上鎖  ○=定點定高切換  □=搖桿校準  15=右搖桿偏移補正")
     print("定點定高中：FC 自動保持位置與高度，顯示 FC 油門")
     print("手動：D-pad上下=基準油門±  Options長按3秒=退出  4+6=緊急停機\n")
 else:
@@ -1031,6 +1088,11 @@ try:
             break
 
         _update_flow_autotrim(state)
+
+        if state['syncing_throttle'] and time.time() - state['syncing_throttle_t'] > 1.5:
+            with _state_lock:
+                state['syncing_throttle'] = False
+            print("\n⚠️ T: 同步逾時，油門凍結已解除")
 
         with _state_lock:
             current_base = state['base_throttle']
@@ -1084,11 +1146,13 @@ try:
             cur_str = f"{cur:.1f}" if cur >= 0 else "---"
             ap = state['flow_autotrim_pitch']
             ar = state['flow_autotrim_roll']
+            pp = state['flow_p_pitch']
+            pr = state['flow_p_roll']
             sys.stdout.write(
                 f"\r[{conn_str}] {arm_str} | {ah_str} | 高:{cur_str} | "
                 f"基:{current_base:3d} | 爪:{state['gripper_val']:3d} | "
                 f"Y:{channels['yaw']:3d} P:{channels['pitch']:3d} R:{channels['roll']:3d} | "
-                f"AT P:{ap:+.3f} R:{ar:+.3f}"
+                f"I P:{ap:+.3f} R:{ar:+.3f} | P P:{pp:+.3f} R:{pr:+.3f}"
                 "\033[K"
             )
             sys.stdout.flush()
