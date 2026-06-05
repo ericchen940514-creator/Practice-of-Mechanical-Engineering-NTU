@@ -388,14 +388,12 @@ def read_gamepad(joystick, state):
             state['arm_pending']         = False
             state['arm_state']           = 0
             state['alt_hold_active']     = False
-            state['flow_autotrim_pitch'] = 0.0
-            state['flow_autotrim_roll']  = 0.0
             state['flow_p_pitch']        = 0.0
             state['flow_p_roll']         = 0.0
     state['prev_tri'] = curr_tri
 
-    if joystick.get_button(BTN_L1): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
-    if joystick.get_button(BTN_R1): state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
+    # L1 → 0°(夾), R1 → 70°(開), 都沒按 → 保持
+    state['gripper_val'] = 1 if joystick.get_button(BTN_L1) else (2 if joystick.get_button(BTN_R1) else 0)
 
     ah_val = 1 if state['alt_hold_active'] else 0
     channels = {
@@ -504,14 +502,12 @@ def read_keyboard(state):
             state['arm_pending']         = False
             state['arm_state']           = 0
             state['alt_hold_active']     = False
-            state['flow_autotrim_pitch'] = 0.0
-            state['flow_autotrim_roll']  = 0.0
             state['flow_p_pitch']        = 0.0
             state['flow_p_roll']         = 0.0
     state['prev_r'] = curr_r
 
-    if kb.is_pressed('q'): state['gripper_val'] = max(0,   state['gripper_val'] - STEP_SPEED)
-    if kb.is_pressed('e'): state['gripper_val'] = min(255, state['gripper_val'] + STEP_SPEED)
+    # Q → 0°(夾), E → 70°(開), 都沒按 → 保持
+    state['gripper_val'] = 1 if kb.is_pressed('q') else (2 if kb.is_pressed('e') else 0)
 
     ah_val = 1 if state['alt_hold_active'] else 0
     channels = {
@@ -826,7 +822,7 @@ if bt_serial is None:
 state = {
     'base_throttle':  0,
     'throttle_step':  5,
-    'gripper_val':    127,
+    'gripper_val':    0,
     'arm_state':      0,
     'is_exiting':     False,
     'exit_press_time': 0,
