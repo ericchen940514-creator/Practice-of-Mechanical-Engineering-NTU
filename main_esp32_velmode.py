@@ -79,7 +79,7 @@ FLOW_AUTOTRIM_DEADZONE = 0.5      # 物理單位 cm 等效，低於此值不積�
 FLOW_AUTOTRIM_MAX      = 0.50     # 自動 trim 上限（±，在 trim ±1 空間）
 FLOW_AUTOTRIM_WINDOW_S = 1.0      # 平均窗口（秒）；拉長讓積分更穩定
 FLOW_AUTOTRIM_STICK_FREEZE = 0.10 # 搖桿超過此值時凍結 autotrim，允許主動移動
-FLOW_PITCH_SIGN        = +1       # dy → pitch 補正方向；飄移方向反向時改 -1
+FLOW_PITCH_SIGN        = -1       # dy → pitch 補正方向；飄移方向反向時改 -1
 FLOW_ROLL_SIGN         = +1       # dx → roll  補正方向；飄移方向反向時改 -1
 _FLOW_COUNTS_TO_RAD    = 0.01     # PMW3901 每 count 對應的視角（rad），與 flow_live 一致
 
