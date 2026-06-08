@@ -1,0 +1,5 @@
+# Kp=0.80 Ki=1.20 Kd=0.0
+time_s,current_alt_cm,target_alt_cm,vel_cmd_cm_s,pid_thr_ibus,pid_thr_0_255
+0.099,8.2,0,-0.0,1204,52
+0.304,8.2,0,-0.0,1206,52
+0.512,8.2,0,-0.0,1205,52

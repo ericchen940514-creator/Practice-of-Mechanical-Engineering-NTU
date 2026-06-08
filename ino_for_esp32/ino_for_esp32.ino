@@ -49,9 +49,8 @@ uint16_t ibus_channels[14] = {
 unsigned long last_ibus_time = 0;
 
 // -------------------- Control State --------------------
-bool alt_hold_ch7 = false;
-int  prev_ah_val  = 0;
 int  manual_throttle = 1500;
+int  servo_angle     = 0;    // 0–70 度，L1=0° R1=70°
 
 // ─── ESP32 速度模式定高 PID（從 sketch_althold_v6_velmode 移植）───
 bool  alt_hold_pid     = false;
@@ -174,51 +173,6 @@ void sendMSP2OptFlow(int16_t dx, int16_t dy, float dt_s) {
     sendMSP2(MSP2_SENSOR_OPTIC_FLOW, buf, 17);
 }
 
-// -------------------- MSP v1 Motor Query --------------------
-void requestMSPMotor() {
-    // MSP v1 request: $ M < len=0 cmd=104 checksum=104
-    uint8_t pkt[] = {'$', 'M', '<', 0x00, 104, 104};
-    Serial1.write(pkt, sizeof(pkt));
-}
-
-// 嘗試從 Serial1 讀取 MSP_MOTOR 回應，成功時填入 motors[4] 並回傳 true
-bool readMSPMotorResponse(uint16_t motors[4]) {
-    static uint8_t  rbuf[32];
-    static int      rpos     = 0;
-    static unsigned long rts = 0;
-
-    while (Serial1.available()) {
-        uint8_t b = Serial1.read();
-        if (rpos == 0) {
-            if (b == '$') { rbuf[rpos++] = b; rts = millis(); }
-        } else {
-            rbuf[rpos++] = b;
-            // 等齊 header 6 bytes: $ M > len cmd ...
-            if (rpos >= 6) {
-                if (rbuf[0]=='$' && rbuf[1]=='M' && rbuf[2]=='>') {
-                    uint8_t len = rbuf[3];
-                    uint8_t cmd = rbuf[4];
-                    if (cmd == 104 && len == 16) {
-                        int need = 5 + 16 + 1;  // $M>+len+cmd(5) + payload(16) + checksum(1)
-                        if (rpos >= need) {
-                            for (int i = 0; i < 4; i++)
-                                motors[i] = rbuf[5 + i*2] | ((uint16_t)rbuf[6 + i*2] << 8);
-                            rpos = 0;
-                            return true;
-                        }
-                    } else {
-                        rpos = 0;
-                    }
-                } else {
-                    rpos = 0;
-                }
-            }
-        }
-        if (rpos > 0 && millis() - rts > 80) rpos = 0;
-    }
-    return false;
-}
-
 // -------------------- Helpers --------------------
 bool resetFlowSensor() {
     digitalWrite(FLOW_RST_PIN, LOW);
@@ -307,6 +261,7 @@ void setup() {
     ESP32PWM::allocateTimer(0);
     gripper_servo.setPeriodHertz(50);
     gripper_servo.attach(SERVO_PIN, 500, 2400);
+    gripper_servo.write(0);   // 上電歸零
 
     // VL53L1X
     distSensor.setTimeout(500);
@@ -413,9 +368,10 @@ void loop() {
                 SerialBT.print("AH:0\n");
             }
 
-            prev_ah_val  = ah_val;
-            alt_hold_ch7 = alt_hold_pid;
-            gripper_servo.writeMicroseconds(map(g_val, 0, 255, 1000, 2000));
+            // L1(g_val=1)→0°, R1(g_val=2)→70°, 其他→保持
+            if      (g_val == 1) servo_angle = 0;
+            else if (g_val == 2) servo_angle = 70;
+            gripper_servo.write(servo_angle);
         }
     }
 
@@ -440,6 +396,15 @@ void loop() {
                     if (!alt_reading_frozen) {
                         alt_reading_frozen = true;
                         SerialBT.print("F:1\n");
+                        if (alt_hold_pid) {
+                            int exit_thr     = (int)ibus_channels[2];
+                            alt_hold_pid     = false;
+                            manual_throttle  = exit_thr;
+                            ibus_channels[2] = exit_thr;
+                            char tbuf[16];
+                            snprintf(tbuf, sizeof(tbuf), "T:%d\n", exit_thr);
+                            SerialBT.print(tbuf);
+                        }
                     }
                     filtered_mm   = (float)mm;
                     filter_inited = true;
@@ -468,8 +433,9 @@ void loop() {
 
     // ── PMW3901 Read + MSP2 Optical Flow ──
     if (flow_ok && millis() - last_flow_time >= FLOW_INTERVAL_MS) {
-        float dt_s = (millis() - last_flow_time) / 1000.0f;
-        last_flow_time = millis();
+        unsigned long flow_now = millis();
+        float dt_s = (flow_now - last_flow_time) / 1000.0f;
+        last_flow_time = flow_now;
 
         int16_t dx = 0, dy = 0;
         flowSensor.readMotionCount(&dx, &dy);

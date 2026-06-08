@@ -40,7 +40,7 @@ __version__ = "0.5.0 (Velocity Mode)"
 # 啟動參數
 # ==========================================
 parser = argparse.ArgumentParser(description='無人機地面控制站（速度模式定高）')
-parser.add_argument('--port', default='COM4', help='藍牙 COM 埠（預設: COM4）')
+parser.add_argument('--port', default='COM9', help='藍牙 COM 埠（預設: COM9）')
 args = parser.parse_args()
 
 COM_PORT  = args.port
