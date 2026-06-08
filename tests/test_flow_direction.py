@@ -28,7 +28,7 @@
   - PMW3901 要對著有紋理的地面，高度抓飛行時的常用高度（例如 30~60cm）。
 
 用法：
-  python test_flow_direction.py --port COM4
+  python test_flow_direction.py --port COM9
 """
 
 import argparse
