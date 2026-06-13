@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# 本機工具 / 編輯器設定
+.claude/
+.vscode/

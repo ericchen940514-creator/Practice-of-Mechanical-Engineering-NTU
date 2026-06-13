@@ -1,17 +1,13 @@
-// Version: 0.7.0 (MSP2 Sensor Hub)
-// Changes from 0.6.1:
-//   - VL53L0X → VL53L1X (Pololu, Medium mode, up to ~3.0 m)
-//   - Added PMW3901 optical flow via SPI (MOSI=23 MISO=19 SCK=18 CS=5)
-//   - Serial1 (GPIO25) → FC UART1 RX as MSP2 sensor input
-//     · MSP2_SENSOR_RANGEFINDER (0x1F01) at ~50 Hz
-//     · MSP2_SENSOR_OPTIC_FLOW  (0x1F02) at ~50 Hz
+// Version: 0.8.0 (no MSP2 sensor output to FC)
+// Changes from 0.7.0:
+//   - 移除所有送往飛控的 MSP2 感測器資料（Rangefinder + Optical Flow）
+//   - VL53L1X / PMW3901 仍由 ESP32 自行讀取（定高 PID + BT 回傳 PC 記錄）
 //   - BT telemetry: D:mm (5 Hz) + OF:dx,dy (25 Hz) for PC logging
 //
 // Wiring:
 //   VL53L1X  I2C   SDA=21  SCL=22
 //   PMW3901  SPI   MOSI=23 MISO=19 SCK=18 CS=5
 //   iBUS     UART2 TX=17   RX=16 (unused)  → FC UART1 RX
-//   MSP2     UART1 TX=25   RX=34           ↔ FC UART3 (iNAV: Sensor Input = MSP)
 //   Servo    GPIO13
 //
 // iNAV setup required:
@@ -36,8 +32,6 @@ const int IBUS_RX_PIN    = 16;
 const int IBUS_TX_PIN    = 17;
 const int I2C_SDA_PIN    = 21;
 const int I2C_SCL_PIN    = 22;
-const int MSP_TX_PIN     = 25;
-const int MSP_RX_PIN     = 34;  // FC UART1 TX → ESP32（input-only GPIO）
 const int FLOW_RST_PIN   = 26;  // PMW3901 NRESET（低電位重置）
 
 // -------------------- iBUS Channels --------------------
@@ -102,76 +96,6 @@ const unsigned long SENSOR_FRESH_TIMEOUT_MS = 200;
 const unsigned long FLOW_INTERVAL_MS        = 20;   // MSP2 optical flow rate
 const unsigned long OF_REPORT_INTERVAL_MS   = 40;   // BT OF telemetry rate (25 Hz)
 
-// -------------------- MSP2 Protocol --------------------
-#define MSP2_SENSOR_RANGEFINDER  0x1F01
-#define MSP2_SENSOR_OPTIC_FLOW   0x1F02
-
-// 1 PMW3901 count ≈ 0.01 rad (≈ 0.57°); fine-tune with iNAV opflow_scale
-const float COUNTS_TO_RAD = 0.01f;
-
-static uint8_t crc8_dvb_s2(uint8_t crc, uint8_t a) {
-    crc ^= a;
-    for (int i = 0; i < 8; i++) {
-        crc = (crc & 0x80) ? (crc << 1) ^ 0xD5 : (crc << 1);
-    }
-    return crc;
-}
-
-void sendMSP2(uint16_t func, const uint8_t *payload, uint16_t len) {
-    uint8_t flag  = 0x00;
-    uint8_t fn_lo = func & 0xFF;
-    uint8_t fn_hi = (func >> 8) & 0xFF;
-    uint8_t sz_lo = len & 0xFF;
-    uint8_t sz_hi = (len >> 8) & 0xFF;
-
-    uint8_t crc = 0;
-    crc = crc8_dvb_s2(crc, flag);
-    crc = crc8_dvb_s2(crc, fn_lo);
-    crc = crc8_dvb_s2(crc, fn_hi);
-    crc = crc8_dvb_s2(crc, sz_lo);
-    crc = crc8_dvb_s2(crc, sz_hi);
-    for (uint16_t i = 0; i < len; i++) {
-        crc = crc8_dvb_s2(crc, payload[i]);
-    }
-
-    Serial1.write('$');
-    Serial1.write('X');
-    Serial1.write('<');
-    Serial1.write(flag);
-    Serial1.write(fn_lo);
-    Serial1.write(fn_hi);
-    Serial1.write(sz_lo);
-    Serial1.write(sz_hi);
-    Serial1.write(payload, len);
-    Serial1.write(crc);
-}
-
-void sendMSP2Rangefinder(int dist_mm) {
-    uint8_t quality = (dist_mm > 0 && dist_mm < 4000) ? 255 : 0;
-    int32_t d = quality ? (int32_t)dist_mm : -1;
-    uint8_t buf[5];
-    buf[0] = quality;
-    memcpy(&buf[1], &d, 4);
-    sendMSP2(MSP2_SENSOR_RANGEFINDER, buf, 5);
-}
-
-void sendMSP2OptFlow(int16_t dx, int16_t dy, float dt_s) {
-    float fx = (dt_s > 0.001f) ? dx * COUNTS_TO_RAD / dt_s : 0.0f;
-    float fy = (dt_s > 0.001f) ? dy * COUNTS_TO_RAD / dt_s : 0.0f;
-    if (fx >  20.0f) fx =  20.0f;
-    if (fx < -20.0f) fx = -20.0f;
-    if (fy >  20.0f) fy =  20.0f;
-    if (fy < -20.0f) fy = -20.0f;
-    float bx = 0.0f, by = 0.0f;
-    uint8_t quality = 200;
-    uint8_t buf[17];
-    buf[0] = quality;
-    memcpy(&buf[1],  &fx, 4);
-    memcpy(&buf[5],  &fy, 4);
-    memcpy(&buf[9],  &bx, 4);
-    memcpy(&buf[13], &by, 4);
-    sendMSP2(MSP2_SENSOR_OPTIC_FLOW, buf, 17);
-}
 
 // -------------------- Helpers --------------------
 bool resetFlowSensor() {
@@ -250,7 +174,6 @@ void setup() {
     delay(200);
 
     Serial2.begin(115200, SERIAL_8N1, IBUS_RX_PIN, IBUS_TX_PIN);
-    Serial1.begin(115200, SERIAL_8N1, MSP_RX_PIN, MSP_TX_PIN);
 
     SerialBT.begin("ESP32_Drone_Hub");
     Serial.println("ESP32 Bluetooth Started!");
@@ -375,7 +298,7 @@ void loop() {
         }
     }
 
-    // ── VL53L1X Read + MSP2 Rangefinder ──
+    // ── VL53L1X Read（僅 ESP32 內部定高用，不再送 FC）──
     if (sensor_ok && distSensor.dataReady()) {
         int mm = distSensor.read(false);
         bool valid = !distSensor.timeoutOccurred() && mm > 0 && mm < 3000;
@@ -427,11 +350,10 @@ void loop() {
             }
         }
 
-        sendMSP2Rangefinder(valid ? mm : 0);
         Serial.printf("[RF] mm=%d valid=%d timeout=%d\n", mm, valid, distSensor.timeoutOccurred());
     }
 
-    // ── PMW3901 Read + MSP2 Optical Flow ──
+    // ── PMW3901 Read（僅累積後經 BT 回傳 PC，不再送 FC）──
     if (flow_ok && millis() - last_flow_time >= FLOW_INTERVAL_MS) {
         unsigned long flow_now = millis();
         float dt_s = (flow_now - last_flow_time) / 1000.0f;
@@ -458,8 +380,6 @@ void loop() {
         } else {
             flow_zero_count = 0;
         }
-
-        sendMSP2OptFlow(dx, dy, dt_s);
 
         accum_dx += dx;
         accum_dy += dy;

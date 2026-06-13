@@ -42,7 +42,6 @@ __version__ = "0.5.0 (Velocity Mode)"
 parser = argparse.ArgumentParser(description='無人機地面控制站（速度模式定高）')
 parser.add_argument('--port', default='COM9', help='藍牙 COM 埠（預設: COM9）')
 args = parser.parse_args()
-
 COM_PORT  = args.port
 BAUD_RATE = 9600
 
@@ -53,7 +52,7 @@ STEP_SPEED = 5
 DEAD_ZONE  = 0.05
 
 THROTTLE_EXPO = 0.75
-TILT_EXPO     = 0.50
+TILT_EXPO     = 0.65
 YAW_EXPO      = 0.50
 
 ALT_MAX_CM    = 300
@@ -345,10 +344,13 @@ def read_gamepad(joystick, state):
     state['stick_pitch'] = raw_pitch
     state['stick_roll']  = raw_roll
     trim_pitch, trim_roll = state['right_stick_trim']
-    auto_p = state['flow_autotrim_pitch']
-    auto_r = state['flow_autotrim_roll']
-    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch + auto_p + state['flow_p_pitch']))
-    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll  + auto_r + state['flow_p_roll']))
+    # ── 光流補償先停用（P+I 都註解掉，只保留手動 trim）──
+    # auto_p = state['flow_autotrim_pitch']
+    # auto_r = state['flow_autotrim_roll']
+    # raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch + auto_p + state['flow_p_pitch']))
+    # raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll  + auto_r + state['flow_p_roll']))
+    raw_pitch = max(-1.0, min(1.0, raw_pitch + trim_pitch))
+    raw_roll  = max(-1.0, min(1.0, raw_roll  + trim_roll))
 
     # 解鎖序列：arm_pending 期間強制送 0 油門，時間到再真正解鎖
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -462,8 +464,9 @@ def read_keyboard(state):
     raw_roll     = apply_expo(max(-1.0, min(1.0, (-1.0 if kb.is_pressed('left') else 0.0) + (1.0 if kb.is_pressed('right') else 0.0))), TILT_EXPO)
     state['stick_pitch'] = raw_pitch
     state['stick_roll']  = raw_roll
-    raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch'] + state['flow_p_pitch']))
-    raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']  + state['flow_p_roll']))
+    # ── 光流補償先停用 ──
+    # raw_pitch = max(-1.0, min(1.0, raw_pitch + state['flow_autotrim_pitch'] + state['flow_p_pitch']))
+    # raw_roll  = max(-1.0, min(1.0, raw_roll  + state['flow_autotrim_roll']  + state['flow_p_roll']))
 
     # 解鎖序列
     if state['arm_pending'] and not state['alt_hold_active']:
@@ -1083,7 +1086,7 @@ try:
             do_emergency_lock(_bt_exit, state)
             break
 
-        _update_flow_autotrim(state)
+        # _update_flow_autotrim(state)   # 光流補償先停用
 
         if state['syncing_throttle'] and time.time() - state['syncing_throttle_t'] > 1.5:
             with _state_lock:
